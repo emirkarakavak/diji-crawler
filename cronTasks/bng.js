@@ -1,6 +1,7 @@
+// cronTasks/bng.js
 const puppeteer = require("puppeteer");
 const UserAgent = require("user-agents");
-const Item = require("../models/item");
+const { upsertAndArchive } = require("../lib/persist");
 
 exports.run = async (url, categoryName) => {
   if (!url || !categoryName) throw new Error("url ve categoryName zorunlu.");
@@ -32,7 +33,6 @@ exports.run = async (url, categoryName) => {
   try {
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 90000 });
 
-    // ürünler
     await page.waitForSelector("[ins-product-price]", { timeout: 90000 });
 
     const items = await page.$$eval("[ins-product-price]", (products) =>
@@ -44,32 +44,36 @@ exports.run = async (url, categoryName) => {
             .trim() || "Ürün adı bulunamadı";
 
         const price = p.getAttribute("ins-product-price");
-        const salePrice = p.getAttribute("ins-product-sale-price");
-        const finalPrice = salePrice && price !== salePrice ? salePrice : price;
+        const sale = p.getAttribute("ins-product-sale-price");
+        const final = sale && price !== sale ? sale : price;
 
-        return { title, price: (finalPrice || "").trim() };
+        return { title, price: (final || "").trim() };
       })
     );
 
-    for (const item of items) {
-      if (!item.title || !item.price) continue;
-      try {
-        const product = new Item({
+    for (const it of items) {
+      if (!it.title || !it.price) continue;
+
+      // numerik value (varsa)
+      const sellPriceValue = (() => {
+        const n = parseFloat(String(it.price).replace(",", "."));
+        return Number.isFinite(n) ? n : null;
+      })();
+
+      await upsertAndArchive(
+        {
           siteName: "bynogame",
           categoryName,
-          itemName: item.title,
-          sellPrice: item.price, // ins-product-price → zaten numerik string
+          itemName: it.title,
+          sellPrice: it.price,         // ByNoGame attr → zaten numerik string
+          sellPriceValue,
+          currency: "₺",
           url,
-        });
-        await product.save();
-        console.log(`Kaydedildi: ${item.title} - ${item.price}`);
-      } catch (err) {
-        if (err?.code === 11000) {
-          console.warn(`Duplicate, atlandı: ${item.title}`);
-          continue;
-        }
-        console.error(`Kaydetme hatası (${item.title}):`, err?.message || err);
-      }
+        },
+        { archiveMode: "price-change" }
+      );
+
+      console.log(`Upsert: [${categoryName}] ${it.title} -> ${it.price}`);
     }
   } catch (err) {
     console.error("Bynogame scrape hatası:", err?.message || err);

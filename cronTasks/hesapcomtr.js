@@ -1,6 +1,7 @@
+// cronTasks/hesapcomtr.js
 const puppeteer = require("puppeteer");
 const UserAgent = require("user-agents");
-const Item = require("../models/item");
+const { upsertAndArchive } = require("../lib/persist");
 
 exports.run = async (
   url = "https://hesap.com.tr/urunler/mlbb-elmas-satin-al",
@@ -48,7 +49,7 @@ exports.run = async (
   try {
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 90000 });
 
-    // KVKK/çerez kapat (best effort)
+    // KVKK/çerez (best-effort)
     try {
       await page.waitForSelector("button, .btn", { timeout: 5000 });
       await page.evaluate(() => {
@@ -82,7 +83,7 @@ exports.run = async (
     }
     await autoScroll(page);
 
-    // Kartlar gerçekten geldi mi?
+    // Kartlar geldi mi?
     const CARD_SEL =
       "section.product-listing-products ul.products li.col-12.prd div.item";
     await page.waitForFunction(
@@ -102,7 +103,7 @@ exports.run = async (
 
       const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
 
-      // >>> TL/₺/TRY temiz; sadece numerik string döndür
+      // TL/TRY/₺ temiz → numerik string döndür
       const parsePrice = (txt) => {
         if (!txt) return { raw: "", value: null, currency: null };
         const raw = clean(txt);
@@ -114,13 +115,13 @@ exports.run = async (
           .replace(/(TL|TRY)/gi, "")
           .replace(/[₺$€£]/g, "")
           .replace(/[^\d,.\-]/g, "")
-          .replace(/\.(?=\d{3}(\D|$))/g, "") // binlik noktaları sil
+          .replace(/\.(?=\d{3}(\D|$))/g, "")
           .replace(",", ".")
           .trim();
 
         const value = parseFloat(numericStr);
         return {
-          raw: numericStr,                          // "149.90"
+          raw: numericStr, // "149.90"
           value: Number.isFinite(value) ? value : null,
           currency,
         };
@@ -144,8 +145,8 @@ exports.run = async (
 
         out.push({
           title,
-          priceText: price.raw,       // sadece numerik string
-          priceValue: price.value,    // number
+          priceText: price.raw,
+          priceValue: price.value,
           currency: price.currency || "₺",
         });
       }
@@ -158,7 +159,7 @@ exports.run = async (
       return;
     }
 
-    // Kategoriye böl ve kaydet
+    // Kategoriye böl + UPSERT & ARCHIVE
     for (const item of items) {
       const group = decideCategory(item.title);
       const categoryName = categoryMap[group] || categoryMap.tr;
@@ -166,28 +167,32 @@ exports.run = async (
       const sellPriceStr =
         item.priceText?.trim() ||
         (Number.isFinite(item.priceValue) ? String(item.priceValue) : "");
-
       if (!sellPriceStr) continue;
 
+      const sellPriceValue = Number.isFinite(item.priceValue)
+        ? item.priceValue
+        : (() => {
+            const n = parseFloat(String(sellPriceStr).replace(",", "."));
+            return Number.isFinite(n) ? n : null;
+          })();
+
       try {
-        const doc = new Item({
-          siteName: "hesapcomtr",
-          categoryName,
-          itemName: item.title,
-          sellPrice: sellPriceStr,     // "149.90" — TL/₺ yok
-          sellPriceValue: item.priceValue,
-          currency: item.currency,
-          url,
-        });
-        await doc.save();
+        await upsertAndArchive(
+          {
+            siteName: "hesapcomtr",
+            categoryName,
+            itemName: item.title,
+            sellPrice: sellPriceStr,     // "149.90"
+            sellPriceValue,
+            currency: item.currency,
+            url,
+          },
+          { archiveMode: "price-change" }
+        );
         console.log(
-          `Kaydedildi: [${categoryName}] ${item.title} - ${sellPriceStr} (${item.priceValue ?? "NaN"} ${item.currency})`
+          `Upsert: [${categoryName}] ${item.title} -> ${sellPriceStr} (${sellPriceValue ?? "NaN"} ${item.currency})`
         );
       } catch (err) {
-        if (err?.code === 11000) {
-          console.warn(`Duplicate, atlandı: [${categoryName}] ${item.title}`);
-          continue;
-        }
         console.error(`Kaydetme hatası: [${categoryName}] ${item.title} ->`, err?.message || err);
       }
     }

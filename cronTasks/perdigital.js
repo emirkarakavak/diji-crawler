@@ -1,11 +1,13 @@
+// cronTasks/perdigital.js
 const puppeteer = require("puppeteer");
 const UserAgent = require("user-agents");
-const Item = require("../models/item");
+const { upsertAndArchive } = require("../lib/persist");
 
 /**
  * tasks: [{ url: string, categoryName: string }, ...]
  *  - TR:     https://www.perdigital.com/mobile-legends-elmas
  *  - Global: https://www.perdigital.com/mobile-legends-elmas-global
+ *  - PUBG:   https://www.perdigital.com/online-oyun/tencent-games/pubg-mobile-uc
  */
 exports.run = async (tasks = []) => {
   if (!Array.isArray(tasks) || tasks.length === 0) {
@@ -25,7 +27,9 @@ exports.run = async (tasks = []) => {
   // gerçekçi UA
   const ua = new UserAgent({ deviceCategory: "desktop" }).toString();
   await page.setUserAgent(ua);
-  await page.setExtraHTTPHeaders({ "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7" });
+  await page.setExtraHTTPHeaders({
+    "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
+  });
   await page.evaluateOnNewDocument(() => {
     Object.defineProperty(navigator, "webdriver", { get: () => false });
   });
@@ -34,15 +38,22 @@ exports.run = async (tasks = []) => {
   page.setDefaultTimeout(120000);
 
   const autoScroll = async (p) => {
-    await p.evaluate(() => new Promise((resolve) => {
-      let total = 0; const distance = 800;
-      const timer = setInterval(() => {
-        const { scrollHeight } = document.documentElement;
-        window.scrollBy(0, distance);
-        total += distance;
-        if (total >= scrollHeight - window.innerHeight - 200) { clearInterval(timer); resolve(); }
-      }, 200);
-    }));
+    await p.evaluate(
+      () =>
+        new Promise((resolve) => {
+          let total = 0;
+          const distance = 800;
+          const timer = setInterval(() => {
+            const { scrollHeight } = document.documentElement;
+            window.scrollBy(0, distance);
+            total += distance;
+            if (total >= scrollHeight - window.innerHeight - 200) {
+              clearInterval(timer);
+              resolve();
+            }
+          }, 200);
+        })
+    );
   };
 
   try {
@@ -145,32 +156,41 @@ exports.run = async (tasks = []) => {
         continue;
       }
 
-      // Kayıt — modelinle aynı akış
+      // UPSERT + ARCHIVE
       for (const it of items) {
-        const sellPriceStr = it.priceText?.trim() || (Number.isFinite(it.priceValue) ? String(it.priceValue) : "");
+        const sellPriceStr =
+          it.priceText?.trim() ||
+          (Number.isFinite(it.priceValue) ? String(it.priceValue) : "");
         if (!sellPriceStr) {
           console.warn(`Fiyat boş, atlandı: [${categoryName}] ${it.title}`);
           continue;
         }
 
+        const sellPriceValue = Number.isFinite(it.priceValue)
+          ? it.priceValue
+          : (() => {
+              const n = parseFloat(String(sellPriceStr).replace(",", "."));
+              return Number.isFinite(n) ? n : null;
+            })();
+
         try {
-          const product = new Item({
-            siteName: "perdigital",
-            categoryName,
-            itemName: it.title,
-            sellPrice: sellPriceStr,     // "149.90"
-            sellPriceValue: it.priceValue,
-            currency: it.currency,       // "₺"
-            url,
-          });
-          await product.save();
-          console.log(`Kaydedildi: [${categoryName}] ${it.title} - ${sellPriceStr} (${it.priceValue ?? "NaN"} ${it.currency})`);
+          await upsertAndArchive(
+            {
+              siteName: "perdigital",
+              categoryName,
+              itemName: it.title,
+              sellPrice: sellPriceStr,     // "149.90"
+              sellPriceValue,
+              currency: it.currency,       // "₺"
+              url,
+            },
+            { archiveMode: "price-change" }
+          );
+          console.log(
+            `Upsert: [${categoryName}] ${it.title} -> ${sellPriceStr} (${sellPriceValue ?? "NaN"} ${it.currency})`
+          );
         } catch (err) {
-          if (err?.code === 11000) {
-            console.warn(`Duplicate, atlandı: [${categoryName}] ${it.title}`);
-            continue;
-          }
-          console.error(`Kaydetme hatası: [${categoryName}] ${it.title} ->`, err.message || err);
+          console.error(`Kaydetme hatası: [${categoryName}] ${it.title} ->`, err?.message || err);
         }
       }
     }

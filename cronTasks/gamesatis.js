@@ -1,9 +1,10 @@
+// cronTasks/gamesatis.js
 const puppeteer = require("puppeteer");
 const UserAgent = require("user-agents");
-const Item = require("../models/item");
+const { upsertAndArchive } = require("../lib/persist");
 
 /**
- * GameSatış (MLBB TR & Global)
+ * GameSatış (MLBB / PUBG vs. — TR & Global)
  * tasks: [{ url: string, categoryName: string }, ...]
  */
 exports.run = async (tasks = []) => {
@@ -55,7 +56,7 @@ exports.run = async (tasks = []) => {
   }
   const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
 
-  // >>> Fiyatı TL/TRY/₺'den arındırıp sadece numerik string döndür
+  // sadece numerik string döndür; para birimi ayrı
   const parsePrice = (txt) => {
     if (!txt) return { raw: "", value: null, currency: null };
     const raw = clean(txt);
@@ -73,7 +74,7 @@ exports.run = async (tasks = []) => {
 
     const value = parseFloat(numericStr);
     return {
-      raw: numericStr,                          // "149.90" (₺ YOK)
+      raw: numericStr,                          // "149.90"
       value: Number.isFinite(value) ? value : null,
       currency,
     };
@@ -105,7 +106,6 @@ exports.run = async (tasks = []) => {
         ({ CARD_SEL, NAME_SEL, PRICE_SEL }) => {
           const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
 
-          // sayfa içi aynı parse
           const parsePriceClient = (txt) => {
             if (!txt) return { raw: "", value: null, currency: null };
             const raw = clean(txt);
@@ -121,7 +121,7 @@ exports.run = async (tasks = []) => {
               .trim();
             const value = parseFloat(numericStr);
             return {
-              raw: numericStr,                      // "149.90"
+              raw: numericStr,
               value: Number.isFinite(value) ? value : null,
               currency,
             };
@@ -153,35 +153,41 @@ exports.run = async (tasks = []) => {
         continue;
       }
 
+      // KAYDET — upsert + arşiv
       for (const it of items) {
         const sellPriceStr =
           it.priceText?.trim() ||
           (Number.isFinite(it.priceValue) ? String(it.priceValue) : "");
-
         if (!sellPriceStr) {
           console.warn(`Fiyat boş, atlanıyor: [${categoryName}] ${it.title}`);
           continue;
         }
 
+        // numerik value (sayı)
+        const sellPriceValue = Number.isFinite(it.priceValue)
+          ? it.priceValue
+          : (() => {
+              const n = parseFloat(String(sellPriceStr).replace(",", "."));
+              return Number.isFinite(n) ? n : null;
+            })();
+
         try {
-          const doc = new Item({
-            siteName: "gamesatis",
-            categoryName,
-            itemName: it.title,
-            sellPrice: sellPriceStr,     // "149.90" (₺ YOK)
-            sellPriceValue: it.priceValue,
-            currency: it.currency,
-            url,
-          });
-          await doc.save();
+          await upsertAndArchive(
+            {
+              siteName: "gamesatis",
+              categoryName,
+              itemName: it.title,
+              sellPrice: sellPriceStr,     // "149.90"
+              sellPriceValue,
+              currency: it.currency,
+              url,
+            },
+            { archiveMode: "price-change" }
+          );
           console.log(
-            `Kaydedildi: [${categoryName}] ${it.title} - ${sellPriceStr} (${it.priceValue ?? "NaN"} ${it.currency})`
+            `Upsert: [${categoryName}] ${it.title} -> ${sellPriceStr} (${sellPriceValue ?? "NaN"} ${it.currency})`
           );
         } catch (err) {
-          if (err?.code === 11000) {
-            console.warn(`Duplicate, atlandı: [${categoryName}] ${it.title}`);
-            continue;
-          }
           console.error(`Kaydetme hatası: [${categoryName}] ${it.title} ->`, err?.message || err);
         }
       }

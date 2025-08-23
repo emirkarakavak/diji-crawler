@@ -1,0 +1,115 @@
+1) Yeni site eklerken (örn: epinparasi)
+
+Scraper’ın DB’ye yazdığı değerlerle birebir aynı key’leri kullan.
+
+a) SITE_LABELS (görünen ad)
+
+const SITE_LABELS = {
+  gamesatis:  "GameSatış",
+  hesapcomtr: "HesapComTR",
+  vatangame:  "VatanGame",
+  bynogame:   "ByNoGame",
+  perdigital: "PerDigital",
+  epinparasi: "EpinParası",        // <— YENİ
+};
+
+b) SITE_ORDER (sekme sırası)
+
+const SITE_ORDER = ["gamesatis", "hesapcomtr", "vatangame", "bynogame", "perdigital", "epinparasi"]; // <— YENİ SONA
+
+c) Kategori listeleri (scraper’ın yazdığı categoryName stringleri)
+
+const MLBB_CATEGORIES = [
+  // ...
+  "epinparasi-mlbb-tr",           // <— YENİ (MLBB TR)
+  "epinparasi-mlbb-global",       // <— YENİ (MLBB Global)
+];
+
+const PUBG_CATEGORIES = [
+  // ...
+  "epinparasi-pubgm-tr",          // <— varsa
+  "epinparasi-pubgm-global",      // <— varsa
+];
+
+
+2) Mevcut siteye yeni kategori eklerken
+
+Sadece ilgili diziye eklemen yeter:
+
+const MLBB_CATEGORIES = [
+  // mevcutlar...
+  "gamesatis-mlbb-superpaket",   // <— yeni kategori örneği
+];
+
+Scraper’ın categoryName olarak bunlardan birini yazdığından emin ol.
+
+
+3) (İleride) Yeni oyun eklemek istersen (ör: Free Fire)
+
+Seçenek A çizgisinde kalacaksan bir oyun daha tanımlarsın:
+
+// a) Yeni oyun kategorileri
+const FREEFIRE_CATEGORIES = [
+  "gamesatis-ff-tr", "gamesatis-ff-global",
+  "hesap-ff-tr", "hesap-ff-global",
+  // ... diğer siteler
+];
+
+// b) Toplama dizi
+const ALL_CATEGORIES = [...MLBB_CATEGORIES, ...PUBG_CATEGORIES, ...FREEFIRE_CATEGORIES];
+
+// c) Oyun seti (oyunu ayırmak için)
+const MLBB_SET = new Set(MLBB_CATEGORIES);
+const PUBG_SET  = new Set(PUBG_CATEGORIES);
+const FF_SET    = new Set(FREEFIRE_CATEGORIES);
+
+// d) View-model başlangıcı
+const model = {
+  mlbb:  { id: "mlbb",  label: "Mobile Legends", sites: {} },
+  pubgm: { id: "pubgm", label: "Pubg Mobile",    sites: {} },
+  ff:    { id: "ff",    label: "Free Fire",      sites: {} }, // <— yeni sekme
+};
+
+// e) item’ı oyuna yerleştirme
+const cat = it.categoryName || "";
+const game =
+  MLBB_SET.has(cat) ? "mlbb" :
+  PUBG_SET.has(cat) ? "pubgm" :
+  FF_SET.has(cat)   ? "ff"   : null;
+
+// f) En altta categories çıktısı
+const categories = [
+  { id: model.mlbb.id,  label: model.mlbb.label,  sites: finalizeSites(model.mlbb.sites) },
+  { id: model.pubgm.id, label: model.pubgm.label, sites: finalizeSites(model.pubgm.sites) },
+  { id: model.ff.id,    label: model.ff.label,    sites: finalizeSites(model.ff.sites) }, // <—
+];
+
+
+4) Küçük kontrol listesi
+
+Scraper’larda:
+
+siteName → SITE_LABELS/SITE_ORDER key’iyle aynı slug (küçük harf öneririm).
+
+categoryName → MLBB_CATEGORIES/PUBG_CATEGORIES dizilerindeki stringlerden biri.
+
+Yeni site eklediğinde sadece 3 yeri güncelliyorsun: SITE_LABELS, SITE_ORDER, ilgili CATEGORIES dizisi.
+
+Yeni kategori eklediğinde yalnızca ilgili CATEGORIES dizisi.
+
+Not: Index’leri ekledin; üretimde bir kez await Item.syncIndexes() çalıştırıp log’da “ensured” görmen iyi olur.
+
+
+Kapanışta 5 minik “production” önerisi bırakıyorum:
+
+.env → MONGO_URI, HEADLESS=true, TZ=Europe/Istanbul.
+
+Cron: stagger et (örn. bng 00, gamesatis 05, …) ki aynı anda yüklenmesin.
+
+persist.js’te debug flag’i kapalı tut; sadece sorun olduğunda aç.
+
+Item.syncIndexes()’i bir kez deploy sonrası çalıştırıp logla.
+
+Health check: /healthz → Mongo ping + son cron run timestamp.
+
+Takıldığın yerde yaz, hızlıca çözeriz. 🙌

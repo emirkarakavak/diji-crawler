@@ -10,6 +10,8 @@ const itemSchema = new mongoose.Schema({
 });
 
 itemSchema.index({ siteName: 1, categoryName: 1, itemName: 1 }, { unique: true });
+itemSchema.index({ categoryName: 1, siteName: 1, updatedAt: -1 });
+itemSchema.index({ categoryName: 1, itemName: 1 });
 
 const Item = new mongoose.model('Item', itemSchema);
 

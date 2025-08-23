@@ -1,6 +1,7 @@
 const mongoose = require("mongoose");
 const express = require("express");
 const app = express();
+const Item = require("./models/item");
 const bng = require("./cronTasks/bng");
 const gamesatis = require("./cronTasks/gamesatis");
 const hesapcomtr = require("./cronTasks/hesapcomtr");
@@ -22,6 +23,129 @@ mongoose.connect("mongodb://127.0.0.1/diji-price-crawler")
   })
   .catch(err => console.log("DB error: " + err));
 
+// Görünen site adları ve sıralama
+const SITE_LABELS = {
+  gamesatis: "GameSatış",
+  hesapcomtr: "HesapComTR",
+  vatangame: "VatanGame",
+  bynogame: "ByNoGame",
+  perdigital: "PerDigital",
+};
+const SITE_ORDER = ["gamesatis", "hesapcomtr", "vatangame", "bynogame", "perdigital"];
+
+const MLBB_CATEGORIES = [
+  "gamesatis-mlbb-tr", "gamesatis-mlbb-global",
+  "hesap-mlbb-tr", "hesap-mlbb-global",
+  "vatangame-mlbb-tr", "vatangame-mlbb-global",
+  "bynogame-mlbb-tr", "bynogame-mlbb-global",
+  "perdigital-mlbb-tr", "perdigital-mlbb-global",
+];
+const PUBG_CATEGORIES = [
+  "gamesatis-pubgm",
+  "hesap-pubgm-tr", "hesap-pubgm-global",
+  "vatangame-pubgm-tr", "vatangame-pubgm-global",
+  "bynogame-pubgm",
+  "perdigital-pubgm-tr",
+];
+const ALL_CATEGORIES = [...MLBB_CATEGORIES, ...PUBG_CATEGORIES];
+const MLBB_SET = new Set(MLBB_CATEGORIES);
+const PUBG_SET = new Set(PUBG_CATEGORIES);
+
+// ---- Yardımcılar ----
+const normName = (s) =>
+  String(s || "")
+    .toLowerCase()
+    .replace(/\b(tr|türkiye|turkiye|global|world|server|sunucu)\b/g, " ")
+    .replace(/[^\w+.\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+const stripRegionWord = (s) => String(s || "").replace(/\s+(TR|Global)\b/i, "").trim();
+
+const fmtPriceTR = (input) => {
+  if (input == null) return null;
+  const n = Number(String(input).replace(",", "."));
+  if (!Number.isFinite(n)) return null;
+  try {
+    return n.toLocaleString("tr-TR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  } catch {
+    return n.toFixed(2).replace(".", ",");
+  }
+};
+
+// ---- Route ----
+app.get("/", async (req, res) => {
+  try {
+    // Index kullanır: categoryName $in
+    const items = await Item.find(
+      { categoryName: { $in: ALL_CATEGORIES } },
+      { siteName: 1, categoryName: 1, itemName: 1, sellPrice: 1, sellPriceValue: 1 } // projection
+    ).lean();
+
+    const model = {
+      mlbb:  { id: "mlbb",  label: "Mobile Legends", sites: {} },
+      pubgm: { id: "pubgm", label: "Pubg Mobile",    sites: {} },
+    };
+
+    for (const it of items) {
+      const cat = it.categoryName || "";
+      const game = MLBB_SET.has(cat) ? "mlbb" : (PUBG_SET.has(cat) ? "pubgm" : null);
+      if (!game) continue;
+
+      const region = /global/i.test(cat) ? "global" : "tr";
+      const siteId = String(it.siteName || "").toLowerCase();
+      const siteLabel = SITE_LABELS[siteId] || it.siteName || siteId || "Bilinmeyen";
+
+      if (!model[game].sites[siteId]) {
+        model[game].sites[siteId] = { id: siteId, label: siteLabel, _rows: new Map() };
+      }
+      const group = model[game].sites[siteId];
+
+      const key = normName(it.itemName);
+      const row = group._rows.get(key) || { name: stripRegionWord(it.itemName), tr: null, global: null };
+
+      const priceNum = Number(
+        String((it.sellPriceValue ?? it.sellPrice) ?? "").replace(",", ".")
+      );
+      const priceStr =
+        fmtPriceTR(Number.isFinite(priceNum) ? priceNum : it.sellPrice) ||
+        (it.sellPrice ?? "").replace(".", ",");
+
+      if (region === "tr") row.tr = priceStr || row.tr;
+      else row.global = priceStr || row.global;
+
+      group._rows.set(key, row);
+    }
+
+    // Map → Array ve sıralamalar
+    const finalizeSites = (sitesObj) => {
+      const ids = Object.keys(sitesObj).sort(
+        (a, b) => SITE_ORDER.indexOf(a) - SITE_ORDER.indexOf(b)
+      );
+      return ids.map((sid) => {
+        const site = sitesObj[sid];
+        const rows = Array.from(site._rows.values()).sort((a, b) => {
+          const av = Number(String(a.tr || a.global || "").replace(",", "."));
+          const bv = Number(String(b.tr || b.global || "").replace(",", "."));
+          if (Number.isFinite(av) && Number.isFinite(bv)) return av - bv;
+          return String(a.name).localeCompare(String(b.name), "tr");
+        });
+        return { id: site.id, label: site.label, rows };
+      });
+    };
+
+    const categories = [
+      { id: model.mlbb.id,  label: model.mlbb.label,  sites: finalizeSites(model.mlbb.sites) },
+      { id: model.pubgm.id, label: model.pubgm.label, sites: finalizeSites(model.pubgm.sites) },
+    ];
+
+    res.render("index.twig", { categories });
+  } catch (err) {
+    console.error("Front render hatası:", err?.message || err);
+    res.status(500).send("Hata");
+  }
+});
+
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 const pipeline = [
@@ -31,6 +155,8 @@ const pipeline = [
       "https://www.bynogame.com/tr/oyunlar/mobile-legends/mobile-legends-turkiye",
       "bynogame-mlbb-tr"
     ),
+  },
+  {
     name: "bynogame mlbb GLOBAL",
     run: () => bng.run(
       "https://www.bynogame.com/tr/oyunlar/mobile-legends/mobile-legends-global",
@@ -121,4 +247,5 @@ async function runAllOnce(selected = []) {
   console.log("\n✔ Tüm işler tamam.");
 }
 
-runAllOnce().catch(e => console.error("cron hata:", e));
+// runAllOnce().catch(e => console.error("cron hata:", e));
+

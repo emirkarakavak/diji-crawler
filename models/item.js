@@ -2,7 +2,7 @@ const mongoose = require('mongoose');
 
 const itemSchema = new mongoose.Schema({
     siteName: { type: String, required: true },
-    categoryName: { type: String, required: true }, // mlbb-tr, mlbb-global, pubgm-tr,pubgm-global, pubgm-epin vs.
+    categoryName: { type: String, required: true },
     itemName: { type: String, required: true },
     sellPrice: { type: String, required: true },
 }, {

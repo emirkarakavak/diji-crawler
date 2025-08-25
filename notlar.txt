@@ -1,5 +1,4 @@
 1) Yeni site eklerken (örn: epinparasi)
-
 Scraper’ın DB’ye yazdığı değerlerle birebir aynı key’leri kullan.
 
 a) SITE_LABELS (görünen ad)
@@ -33,7 +32,6 @@ const PUBG_CATEGORIES = [
 
 
 2) Mevcut siteye yeni kategori eklerken
-
 Sadece ilgili diziye eklemen yeter:
 
 const MLBB_CATEGORIES = [
@@ -113,3 +111,374 @@ Item.syncIndexes()’i bir kez deploy sonrası çalıştırıp logla.
 Health check: /healthz → Mongo ping + son cron run timestamp.
 
 Takıldığın yerde yaz, hızlıca çözeriz. 🙌
+
+
+// cronTasks/kabasakalonline.js
+const puppeteer = require("puppeteer");
+const UserAgent = require("user-agents");
+const { upsertAndArchive } = require("../lib/persist");
+
+/**
+ * tasks: [{ url: string, categoryName: string }, ...]
+ * Örnek çağrı:
+ * [
+ *   { url: 'https://kabasakalonline.com/urunler/108/pubg-mobile-uc-tr',        categoryName: 'PUBG UC TR' },
+ *   { url: 'https://kabasakalonline.com/urunler/127/mobile-legends-elmas-tr',  categoryName: 'MLBB Elmas TR' },
+ *   { url: 'https://kabasakalonline.com/urunler/239/mobile-legends-global-elmas', categoryName: 'MLBB Elmas Global' }
+ * ]
+ */
+exports.run = async (tasks = []) => {
+  if (!Array.isArray(tasks) || tasks.length === 0) {
+    throw new Error("tasks boş. [{ url, categoryName }] ver.");
+  }
+
+  const browser = await puppeteer.launch({
+    headless: true,
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-blink-features=AutomationControlled",
+    ],
+  });
+  const page = await browser.newPage();
+
+  // gerçekçi UA + basit sertleştirme
+  const ua = new UserAgent({ deviceCategory: "desktop" }).toString();
+  await page.setUserAgent(ua);
+  await page.setExtraHTTPHeaders({
+    "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
+  });
+  await page.evaluateOnNewDocument(() => {
+    Object.defineProperty(navigator, "webdriver", { get: () => false });
+  });
+  await page.setViewport({ width: 1366, height: 768 });
+  page.setDefaultNavigationTimeout(120000);
+  page.setDefaultTimeout(120000);
+
+  const cleanMoneyToNumber = (txt) => {
+    if (!txt) return null;
+    // Binlik nokta -> sil, virgül -> ondalık
+    const s = String(txt)
+      .replace(/[^\d.,-]/g, "")
+      .replace(/\.(?=\d{3}(\D|$))/g, "")
+      .replace(",", ".");
+    const n = parseFloat(s);
+    return Number.isFinite(n) ? n : null;
+  };
+
+  try {
+    for (const { url, categoryName } of tasks) {
+      if (!url || !categoryName) {
+        console.warn("Task eksik, atlanıyor:", { url, categoryName });
+        continue;
+      }
+
+      console.log(`Scraping: ${url} -> ${categoryName}`);
+      await page.goto(url, { waitUntil: "networkidle2", timeout: 120000 });
+
+      // Basit koruma/ara sayfa tespiti (GEÇMEK yok, sadece atlar)
+      const challenged = await page.evaluate(() => {
+        const t = document.title.toLowerCase();
+        return (
+          t.includes("checking your browser") ||
+          t.includes("just a moment") ||
+          !!document.querySelector('iframe[src*="challenge"], #challenge-form, .hcaptcha-box, .cf-challenge')
+        );
+      });
+      if (challenged) {
+        console.warn("Doğrulama/koruma tespit edildi, atlandı:", url);
+        continue;
+      }
+
+      // İçerik gelene kadar bekle
+      await page.waitForSelector("div#__next main", { timeout: 60000 }).catch(() => {});
+      await page.waitForFunction(
+        () =>
+          document.querySelectorAll('div#__next h6.text-lg.line-clamp-1').length > 0 &&
+          document.querySelectorAll('div#__next span.text-green-500.text-sm.font-bold').length > 0,
+        { timeout: 60000 }
+      ).catch(() => {});
+
+      // Başlık + fiyat çek (basit eşleştirme)
+      const items = await page.evaluate(() => {
+        const titles = Array.from(
+          document.querySelectorAll('div#__next h6.text-lg.line-clamp-1')
+        )
+          .map(n => (n.textContent || "").trim())
+          .filter(Boolean);
+
+        const priceNodes = Array.from(
+          document.querySelectorAll('div#__next span.text-green-500.text-sm.font-bold')
+        )
+          .map(n => (n.textContent || "").trim())
+          .filter(Boolean);
+
+        const results = [];
+        const count = Math.min(titles.length, priceNodes.length);
+        for (let i = 0; i < count; i++) {
+          const title = titles[i];
+          const raw = priceNodes[i];
+
+          const priceText = raw.replace(/[^\d.,-]/g, "").trim(); // sembol yok
+          const curMatch = raw.toUpperCase().match(/(₺|TL|TRY|USD|\$|EUR|€)/);
+          const currency = curMatch ? curMatch[1] : "₺"; // default ₺
+
+          results.push({ title, priceText, currency });
+        }
+        return results;
+      });
+
+      if (!items || items.length === 0) {
+        console.warn(`Kabasakal: ürün bulunamadı -> ${url}`);
+        continue;
+      }
+
+      // DB: UPSERT + ARCHIVE
+      for (const it of items) {
+        const sellPriceStr = it.priceText?.trim();
+        if (!sellPriceStr) {
+          console.warn(`Fiyat boş, atlandı: [${categoryName}] ${it.title}`);
+          continue;
+        }
+        const sellPriceValue = cleanMoneyToNumber(sellPriceStr);
+
+        try {
+          await upsertAndArchive(
+            {
+              siteName: "kabasakalonline",
+              categoryName,
+              itemName: it.title,
+              sellPrice: sellPriceStr,   // "189,99"
+              sellPriceValue,            // 189.99
+              currency: it.currency,     // "₺" | "TL" | ...
+              url,
+            },
+            { archiveMode: "price-change" }
+          );
+          console.log(
+            `Upsert: [${categoryName}] ${it.title} -> ${sellPriceStr} (${sellPriceValue ?? "NaN"} ${it.currency})`
+          );
+        } catch (err) {
+          console.error(`Kaydetme hatası: [${categoryName}] ${it.title} ->`, err?.message || err);
+        }
+      }
+    }
+  } catch (err) {
+    console.error("Kabasakal scrape hatası:", err?.message || err);
+  } finally {
+    await browser.close();
+  }
+};
+
+const { run } = require('./cronTasks/kabasakalonline');
+
+run([
+  { url: 'https://kabasakalonline.com/urunler/108/pubg-mobile-uc-tr',           categoryName: 'PUBG UC TR' },
+  { url: 'https://kabasakalonline.com/urunler/127/mobile-legends-elmas-tr',     categoryName: 'MLBB Elmas TR' },
+  { url: 'https://kabasakalonline.com/urunler/239/mobile-legends-global-elmas', categoryName: 'MLBB Elmas Global' },
+]);
+
+
+
+
+
+///////////
+// cronTasks/kabasakalonline.js
+const puppeteer = require("puppeteer");
+const UserAgent = require("user-agents");
+const { upsertAndArchive } = require("../lib/persist");
+
+/**
+ * tasks: [{ url: string, categoryName: string }, ...]
+ * Örnek:
+ * [
+ *   { url: 'https://kabasakalonline.com/urunler/108/pubg-mobile-uc-tr',           categoryName: 'PUBG UC TR' },
+ *   { url: 'https://kabasakalonline.com/urunler/127/mobile-legends-elmas-tr',     categoryName: 'MLBB Elmas TR' },
+ *   { url: 'https://kabasakalonline.com/urunler/239/mobile-legends-global-elmas', categoryName: 'MLBB Elmas Global' }
+ * ]
+ */
+exports.run = async (tasks = []) => {
+  if (!Array.isArray(tasks) || tasks.length === 0) {
+    throw new Error("tasks boş. [{ url, categoryName }] ver.");
+  }
+
+  const browser = await puppeteer.launch({
+    headless: true,
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-blink-features=AutomationControlled",
+    ],
+  });
+
+  const page = await browser.newPage();
+
+  // gerçekçi UA + küçük sertleştirme
+  const ua = new UserAgent({ deviceCategory: "desktop" }).toString();
+  await page.setUserAgent(ua);
+  await page.setExtraHTTPHeaders({
+    "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
+  });
+  await page.evaluateOnNewDocument(() => {
+    Object.defineProperty(navigator, "webdriver", { get: () => false });
+  });
+  await page.setViewport({ width: 1366, height: 768 });
+  page.setDefaultNavigationTimeout(120000);
+  page.setDefaultTimeout(120000);
+
+  const cleanMoneyToNumber = (txt) => {
+    if (!txt) return null;
+    const s = String(txt)
+      .replace(/[^\d.,-]/g, "")
+      .replace(/\.(?=\d{3}(\D|$))/g, "") // 1.234.567,89 -> 1234567,89
+      .replace(",", ".");
+    const n = parseFloat(s);
+    return Number.isFinite(n) ? n : null;
+  };
+
+  try {
+    for (const { url, categoryName } of tasks) {
+      if (!url || !categoryName) {
+        console.warn("Task eksik, atlanıyor:", { url, categoryName });
+        continue;
+      }
+
+      console.log(`Scraping: ${url} -> ${categoryName}`);
+      await page.goto(url, { waitUntil: "networkidle2", timeout: 120000 });
+
+      // Basit doğrulama/koruma tespiti (geçmeye çalışma yok)
+      const challenged = await page.evaluate(() => {
+        const t = document.title.toLowerCase();
+        return (
+          t.includes("checking your browser") ||
+          t.includes("just a moment") ||
+          !!document.querySelector(
+            'iframe[src*="challenge"], #challenge-form, .hcaptcha-box, .cf-challenge'
+          )
+        );
+      });
+      if (challenged) {
+        console.warn("Doğrulama/koruma tespit edildi, atlandı:", url);
+        continue;
+      }
+
+      // İçerik geldi mi?
+      await page.waitForSelector("div#__next main", { timeout: 60000 }).catch(() => {});
+      await page.waitForFunction(
+        () =>
+          document.querySelectorAll('div#__next h6.text-lg.line-clamp-1').length > 0 &&
+          document.querySelectorAll('div#__next span.text-green-500.text-sm.font-bold').length > 0,
+        { timeout: 60000 }
+      ).catch(() => {});
+
+      // === KART BAZLI EŞLEŞTİRME ===
+      const items = await page.evaluate(() => {
+        const titleSel = 'div#__next h6.text-lg.line-clamp-1';
+        const priceSel = 'div#__next span.text-green-500.text-sm.font-bold';
+
+        const titles = Array.from(document.querySelectorAll(titleSel));
+        const allPrices = Array.from(document.querySelectorAll(priceSel));
+
+        const pickNearest = (titleEl, pricesScope) => {
+          const candidates = pricesScope && pricesScope.length ? pricesScope : allPrices;
+          if (!candidates.length) return null;
+
+          const tb = titleEl.getBoundingClientRect();
+          let best = null;
+          let bestDist = Infinity;
+
+          for (const p of candidates) {
+            const pb = p.getBoundingClientRect();
+            const dx = Math.abs((pb.left + pb.right) / 2 - (tb.left + tb.right) / 2);
+            const dy = Math.abs((pb.top + pb.bottom) / 2 - (tb.top + tb.bottom) / 2);
+            const d = Math.hypot(dx, dy);
+            if (d < bestDist) {
+              bestDist = d;
+              best = p;
+            }
+          }
+          return best;
+        };
+
+        const findPriceForTitle = (titleEl) => {
+          // 1) Başlıktan yukarı doğru ebeveynlerde gez, bu ebeveynin İÇİNDEki fiyatlardan en yakını al
+          let node = titleEl;
+          for (let depth = 0; depth < 10 && node && node !== document.body; depth++) {
+            const pricesInThis = Array.from(node.querySelectorAll('span.text-green-500.text-sm.font-bold'));
+            if (pricesInThis.length) {
+              return pickNearest(titleEl, pricesInThis);
+            }
+            node = node.parentElement;
+          }
+          // 2) Fallback: tüm sayfadaki fiyatlardan en yakın olanı
+          return pickNearest(titleEl, null);
+        };
+
+        const results = [];
+        const seen = new Set();
+
+        for (const t of titles) {
+          const title = (t.textContent || "").trim();
+          if (!title) continue;
+
+          const priceEl = findPriceForTitle(t);
+          if (!priceEl) continue;
+
+          const raw = (priceEl.textContent || "").trim();
+          const priceText = raw.replace(/[^\d.,-]/g, "").trim(); // sembolsüz
+          if (!priceText) continue;
+
+          const curMatch = raw.toUpperCase().match(/(₺|TL|TRY|USD|\$|EUR|€)/);
+          const currency = curMatch ? curMatch[1] : "₺";
+
+          const key = `${title}|${priceText}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+
+          results.push({ title, priceText, currency });
+        }
+
+        return results;
+      });
+
+      if (!items || items.length === 0) {
+        console.warn(`Kabasakal: ürün bulunamadı -> ${url}`);
+        continue;
+      }
+
+      // DB'ye yaz
+      for (const it of items) {
+        const sellPriceStr = it.priceText?.trim();
+        if (!sellPriceStr) {
+          console.warn(`Fiyat boş, atlandı: [${categoryName}] ${it.title}`);
+          continue;
+        }
+        const sellPriceValue = cleanMoneyToNumber(sellPriceStr);
+
+        try {
+          await upsertAndArchive(
+            {
+              siteName: "kabasakalonline",
+              categoryName,
+              itemName: it.title,
+              sellPrice: sellPriceStr,   // "189,99"
+              sellPriceValue,            // 189.99
+              currency: it.currency,     // "₺" | "TL" | "TRY" | ...
+              url,
+            },
+            { archiveMode: "price-change" }
+          );
+          console.log(
+            `Upsert: [${categoryName}] ${it.title} -> ${sellPriceStr} (${sellPriceValue ?? "NaN"} ${it.currency})`
+          );
+        } catch (err) {
+          console.error(`Kaydetme hatası: [${categoryName}] ${it.title} ->`, err?.message || err);
+        }
+      }
+    }
+  } catch (err) {
+    console.error("Kabasakal scrape hatası:", err?.message || err);
+  } finally {
+    await browser.close();
+  }
+};

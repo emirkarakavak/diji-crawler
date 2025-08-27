@@ -70,7 +70,7 @@ exports.run = async (url, categoryName) => {
           currency: "₺",
           url,
         },
-        { archiveMode: "price-change" }
+        { archiveMode: "always" }
       );
 
       console.log(`Upsert: [${categoryName}] ${it.title} -> ${it.price}`);

@@ -2,6 +2,7 @@ const mongoose = require("mongoose");
 const express = require("express");
 const app = express();
 const Item = require("./models/item");
+const ItemArchived = require("./models/itemArchived");
 const cron = require("node-cron");
 const bng = require("./cronTasks/bng");
 const gamesatis = require("./cronTasks/gamesatis");
@@ -9,6 +10,7 @@ const hesapcomtr = require("./cronTasks/hesapcomtr");
 const perdigital = require("./cronTasks/perdigital");
 const vatangame = require("./cronTasks/vatangame");
 const kabasakal = require("./cronTasks/kabasakal");
+
 
 
 
@@ -81,10 +83,9 @@ const fmtPriceTR = (input) => {
 // ---- Route ----
 app.get("/", async (req, res) => {
   try {
-    // Index kullanır: categoryName $in
     const items = await Item.find(
       { categoryName: { $in: ALL_CATEGORIES } },
-      { siteName: 1, categoryName: 1, itemName: 1, sellPrice: 1, sellPriceValue: 1 } // projection
+      { siteName: 1, categoryName: 1, itemName: 1, sellPrice: 1, sellPriceValue: 1 }
     ).lean();
 
     const model = {
@@ -107,7 +108,12 @@ app.get("/", async (req, res) => {
       const group = model[game].sites[siteId];
 
       const key = normName(it.itemName);
-      const row = group._rows.get(key) || { name: stripRegionWord(it.itemName), tr: null, global: null };
+      const row = group._rows.get(key) || { 
+        name: stripRegionWord(it.itemName), 
+        originalName: it.itemName, // <-- Burası değişti
+        tr: null, 
+        global: null 
+      };
 
       const priceNum = Number(
         String((it.sellPriceValue ?? it.sellPrice) ?? "").replace(",", ".")
@@ -161,6 +167,7 @@ const pipeline = [
       "bynogame-mlbb-tr"
     ),
   },
+   
   {
     name: "bynogame mlbb GLOBAL",
     run: () => bng.run(
@@ -248,6 +255,7 @@ const pipeline = [
       { url: "https://kabasakalonline.com/urunler/239/mobile-legends-global-elmas", categoryName: "kabasakal-mlbb-global" },
     ]),
   }
+    
 ];
 
 async function runAllOnce(selected = []) {
@@ -259,6 +267,7 @@ async function runAllOnce(selected = []) {
     const t0 = Date.now();
     console.log(`\n▶ ${task.name} başlıyor`);
     try {
+
       await task.run();
       console.log(`✓ ${task.name} bitti (${((Date.now() - t0) / 1000).toFixed(1)} sn)`);
     } catch (err) {
@@ -268,11 +277,109 @@ async function runAllOnce(selected = []) {
   }
   console.log("\n✔ Tüm işler tamam.");
 }
+
+// Fiyat geçmişini getiren yeni API uç noktası
+app.get('/api/price-history', async (req, res) => {
+  const { itemName } = req.query;
+
+  if (!itemName) {
+    return res.status(400).json({ error: "itemName parametresi gerekli." });
+  }
+
+  try {
+    // Veritabanından tüm fiyat geçmişini al
+    const history = await Item.find({ itemName: itemName })
+      .sort({ createdAt: 1 }) // Tarihe göre sırala
+      .lean();
+
+    // Veriyi front-end'in beklediği formata dönüştür
+    const priceHistory = history.map(item => {
+      const region = /global/i.test(item.categoryName) ? 'global' : 'tr';
+      const priceValue = item.sellPriceValue ?? item.sellPrice;
+
+      return {
+        itemName: item.itemName,
+        createdAt: item.createdAt,
+        // Bölgeye göre fiyatları ayır
+        sellPriceTR: region === 'tr' ? priceValue : null,
+        sellPriceGlobal: region === 'global' ? priceValue : null,
+      };
+    });
+
+    res.json(priceHistory);
+  } catch (err) {
+    console.error("Fiyat geçmişi API hatası:", err);
+    res.status(500).json({ error: "Sunucu hatası." });
+  }
+});
+
+
+app.get('/items/filter', async (req, res) => {
+  let { start, end, category, site, page } = req.query;
+
+  if (!category || !site) {
+    return res.json({ success: false, rows: [] });
+  }
+
+  page = parseInt(page) || 1;
+  const limit = 25;
+  const skip = (page - 1) * limit;
+
+  const startDate = start ? new Date(start) : new Date('1970-01-01'); // filtre yoksa tüm kayıtlar
+  const endDate = end ? new Date(end) : new Date(); // bugünkü tarih
+  endDate.setHours(23, 59, 59, 999);
+
+  try {
+    const CATEGORY_MAP = {
+      mlbb: MLBB_CATEGORIES,
+      pubgm: PUBG_CATEGORIES
+    };
+
+    const categoriesToSearch = CATEGORY_MAP[category] || [];
+    const siteRegex = new RegExp(`^${site}`, "i");
+
+    const totalCount = await Item.countDocuments({
+      categoryName: { $in: categoriesToSearch },
+      siteName: { $regex: siteRegex },
+      createdAt: { $gte: startDate, $lte: endDate }
+    });
+
+    const items = await Item.find({
+      categoryName: { $in: categoriesToSearch },
+      siteName: { $regex: siteRegex },
+      createdAt: { $gte: startDate, $lte: endDate }
+    })
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit);
+
+    const rows = items.map(it => {
+      const region = /global/i.test(it.categoryName) ? 'global' : 'tr';
+      return {
+        name: it.itemName,
+        tr: region === 'tr' ? it.sellPrice : '-',
+        global: region === 'global' ? it.sellPrice : '-'
+      };
+    });
+
+    const totalPages = Math.ceil(totalCount / limit);
+
+    res.json({ success: true, rows, page, totalPages, totalCount });
+  } catch (err) {
+    console.error(err);
+    res.json({ success: false, rows: [] });
+  }
+});
+
+
+
+
+
 runAllOnce().catch(e => console.error("cron hata:", e));
 
-// cron.schedule("*/30 * * * *", () => {
-//   runAllOnce().catch(e => console.error("cron hata:", e));
-// }, {
-//   scheduled: true, // default true zaten
-//   timezone: "Europe/Istanbul" // saat dilimini netleştirmek istersen
-// });
+   cron.schedule("*/30 * * * *", () => {
+     runAllOnce().catch(e => console.error("cron hata:", e));
+   }, {
+     scheduled: true, // default true zaten
+  timezone: "Europe/Istanbul" // saat dilimini netleştirmek istersen
+   });

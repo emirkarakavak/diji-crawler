@@ -5,12 +5,17 @@
   <title>E-Pin Fiyatları (TR & Global)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr/dist/flatpickr.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
   <style>
     body { background: #0f172a; }
     .card { border: none; }
     .price { font-variant-numeric: tabular-nums; }
     .nav-tabs, .nav-pills { flex-wrap: wrap; }
     .nav-tabs .nav-link, .nav-pills .nav-link { margin-bottom: .5rem; }
+    .pagination-container button { min-width: 36px; }
+    .table-hover tbody tr:hover { cursor: pointer; } /* Tablo satırlarını tıklanabilir yap */
   </style>
 </head>
 <body class="text-light">
@@ -20,13 +25,11 @@
       <div class="card shadow-lg">
         <div class="card-body p-0">
 
-          <!-- Başlık -->
           <div class="p-4 border-bottom bg-dark text-white rounded-top">
             <h1 class="h4 mb-1">Ürün Fiyatları</h1>
-            <p class="mb-0 text-white-50">Üstten kategori seç; içeride site sekmeleri arasında gez.</p>
+            <p class="mb-0 text-white-50">Ürünlerin anlık fiyatlarını ve fiyat geçmişini görüntüle.</p>
           </div>
 
-          <!-- ANA KATEGORİ SEKMELERİ -->
           <ul class="nav nav-pills px-3 pt-3 bg-dark-subtle" id="categoryTabs" role="tablist">
             {% for cat in categories %}
               <li class="nav-item">
@@ -34,8 +37,7 @@
                         id="{{ cat.id }}-tab"
                         data-bs-toggle="tab"
                         data-bs-target="#{{ cat.id }}"
-                        type="button"
-                        role="tab">
+                        type="button" role="tab">
                   {{ cat.label }}
                 </button>
               </li>
@@ -44,11 +46,8 @@
 
           <div class="tab-content" id="categoryTabsContent">
             {% for cat in categories %}
-              <div class="tab-pane fade {{ loop.first ? 'show active' : '' }}"
-                   id="{{ cat.id }}" role="tabpanel" aria-labelledby="{{ cat.id }}-tab">
-
-                <!-- Şirket sekmeleri -->
-                <ul class="nav nav-tabs px-3 pt-3 bg-body-tertiary" id="{{ cat.id }}-companyTabs" role="tablist">
+              <div class="tab-pane fade {{ loop.first ? 'show active' : '' }}" id="{{ cat.id }}">
+                <ul class="nav nav-tabs px-3 pt-3 bg-body-tertiary" role="tablist">
                   {% for site in cat.sites %}
                     <li class="nav-item">
                       <button class="nav-link {{ loop.first ? 'active' : '' }}"
@@ -61,9 +60,25 @@
                   {% endfor %}
                 </ul>
 
-                <div class="tab-content bg-body-tertiary" id="{{ cat.id }}-companyTabsContent">
+                <div class="tab-content bg-body-tertiary">
                   {% for site in cat.sites %}
                     <div class="tab-pane fade {{ loop.first ? 'show active' : '' }}" id="{{ cat.id }}-{{ site.id }}">
+                      
+                      <div class="bg-dark p-2 d-flex gap-2">
+                        <input type="text" class="form-control form-control-sm date-range"
+                               placeholder="Tarih Aralığı"
+                               data-category="{{ cat.id }}"
+                               data-site="{{ site.id }}">
+                        <button class="btn btn-primary btn-sm filter-btn"
+                                data-category="{{ cat.id }}"
+                                data-site="{{ site.id }}">Filtrele</button>
+                      </div>
+
+                      <div class="chart-container mt-4 p-3 border-top border-bottom">
+                        <h5 class="chart-title text-center text-white-50">Grafik için bir ürün seçin</h5>
+                        <canvas id="chart-{{ cat.id }}-{{ site.id }}" height="200" style="display:none;"></canvas>
+                      </div>
+
                       <div class="table-responsive">
                         <table class="table table-hover table-borderless align-middle mb-0">
                           <thead class="table-dark">
@@ -73,23 +88,23 @@
                               <th class="text-end">Global (₺)</th>
                             </tr>
                           </thead>
-                          <tbody>
-                          {% if site.rows|length %}
-                            {% for row in site.rows %}
-                              <tr>
-                                <td>{{ row.name }}</td>
-                                <td class="text-end price">{{ row.tr ?? '-' }}</td>
-                                <td class="text-end price">{{ row.global ?? '-' }}</td>
-                              </tr>
-                            {% endfor %}
-                          {% else %}
-                            <tr>
-                              <td colspan="3" class="text-center text-muted">Kayıt yok</td>
-                            </tr>
-                          {% endif %}
+                          <tbody id="tbody-{{ cat.id }}-{{ site.id }}">
+                            {% if site.rows|length %}
+                              {% for row in site.rows %}
+                                <tr data-item-name="{{ row.name }}">
+                                  <td>{{ row.name }}</td>
+                                  <td class="text-end price">{{ row.tr ?? '-' }}</td>
+                                  <td class="text-end price">{{ row.global ?? '-' }}</td>
+                                </tr>
+                              {% endfor %}
+                            {% else %}
+                              <tr><td colspan="3" class="text-center text-muted">Kayıt yok</td></tr>
+                            {% endif %}
                           </tbody>
                         </table>
+                        <div class="pagination-container mt-2 d-flex justify-content-center gap-2"></div>
                       </div>
+
                     </div>
                   {% endfor %}
                 </div>
@@ -97,15 +112,198 @@
             {% endfor %}
           </div>
 
-          <div class="p-3 bg-dark text-white-50 rounded-bottom">
-            <small>//</small>
-          </div>
-
+          <div class="p-3 bg-dark text-white-50 rounded-bottom"><small>//</small></div>
         </div>
       </div>
     </div>
   </div>
 </div>
+
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
+<script>
+const charts = {};
+
+async function fetchPriceHistory(itemName) {
+  try {
+    // Bu API uç noktasını arka planda oluşturmanız gerekiyor.
+    // Örnek: `/api/price-history?itemName=ürün-adı`
+    const response = await fetch(`/api/price-history?itemName=${encodeURIComponent(itemName)}`);
+    if (!response.ok) throw new Error('API yanıtı başarısız');
+    const data = await response.json();
+    return data;
+  } catch (err) {
+    console.error(`Fiyat geçmişi çekilirken hata: ${err}`);
+    return [];
+  }
+}
+
+function renderChart(category, site, historyData) {
+  const ctxId = `chart-${category}-${site}`;
+  const ctx = document.getElementById(ctxId);
+  const chartTitle = ctx.closest('.chart-container').querySelector('.chart-title');
+
+  if (!ctx || !chartTitle) return;
+
+  if (charts[ctxId]) charts[ctxId].destroy();
+
+  // Yeterli veri yoksa (tek bir fiyat kaydı varsa), grafiği gizle
+  if (!historyData || historyData.length <= 1) {
+    ctx.style.display = 'none';
+    chartTitle.textContent = `Grafik için bir ürün seçin veya fiyat geçmişi yetersiz.`;
+    return;
+  }
+  
+  // Veri varsa, başlığı ve grafiği göster
+  ctx.style.display = 'block';
+  chartTitle.textContent = `${historyData[0].itemName} Fiyat Geçmişi`;
+
+  const labels = historyData.map(d => new Date(d.createdAt).toLocaleDateString());
+  const trData = historyData.map(d => parseFloat(d.sellPriceTR) || 0); // Varsayılan TR fiyatı
+  const globalData = historyData.map(d => parseFloat(d.sellPriceGlobal) || 0); // Varsayılan Global fiyatı
+
+  charts[ctxId] = new Chart(ctx, {
+    type: 'line', // Fiyat geçmişi için çizgi grafiği daha uygun
+    data: {
+      labels,
+      datasets: [
+        {
+          label: 'TR Fiyatı (₺)',
+          data: trData,
+          borderColor: 'rgba(255,99,132,1)',
+          backgroundColor: 'rgba(255,99,132,0.2)',
+          fill: true,
+          tension: 0.1
+        },
+        {
+          label: 'Global Fiyat (₺)',
+          data: globalData,
+          borderColor: 'rgba(54,162,235,1)',
+          backgroundColor: 'rgba(54,162,235,0.2)',
+          fill: true,
+          tension: 0.1
+        }
+      ]
+    },
+    options: {
+      responsive: true,
+      plugins: {
+        legend: { position: 'top' },
+        tooltip: { mode: 'index', intersect: false }
+      },
+      scales: {
+        x: { display: true, title: { display: true, text: 'Tarih' } },
+        y: { display: true, title: { display: true, text: 'Fiyat (₺)' } }
+      }
+    }
+  });
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+  const fpInstances = {};
+  document.querySelectorAll('.date-range').forEach(input => {
+    const key = `${input.dataset.category}__${input.dataset.site}`;
+    fpInstances[key] = flatpickr(input, { mode: "range", dateFormat: "Y-m-d" });
+  });
+
+  function escapeHtml(s) { return String(s ?? '').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
+
+  function renderRows(category, site, rows) {
+  const tbody = document.getElementById(`tbody-${category}-${site}`);
+  tbody.innerHTML = '';
+  if (!rows.length) {
+    tbody.innerHTML = `<tr><td colspan="3" class="text-center text-muted">Kayıt yok</td></tr>`;
+  } else {
+    rows.forEach(row => {
+      const tr = document.createElement('tr');
+      // Aşağıdaki satırı güncelliyoruz
+      tr.dataset.itemName = row.originalName; 
+      tr.innerHTML = `
+        <td>${escapeHtml(row.name)}</td>
+        <td class="text-end price">${escapeHtml(row.tr)}</td>
+        <td class="text-end price">${escapeHtml(row.global)}</td>
+      `;
+      tr.addEventListener('click', async () => {
+        const history = await fetchPriceHistory(tr.dataset.itemName);
+        renderChart(category, site, history);
+      });
+      tbody.appendChild(tr);
+    });
+  }
+  renderChart(category, site, null); 
+}
+
+  function renderPagination(category, site, currentPage, totalPages) {
+    const tableWrapper = document.getElementById(`tbody-${category}-${site}`).closest('.table-responsive');
+    if (!tableWrapper) return;
+    let container = tableWrapper.querySelector(`.pagination-container`);
+    if (!container) {
+      container = document.createElement('nav');
+      container.className = 'pagination-container mt-2 d-flex justify-content-center';
+      tableWrapper.appendChild(container);
+    }
+    container.innerHTML = '';
+    const ul = document.createElement('ul');
+    ul.className = 'pagination';
+    function createPageItem(page, text=null, disabled=false, active=false){
+      const li = document.createElement('li');
+      li.className = 'page-item'+(disabled?' disabled':'')+(active?' active':'');
+      const a = document.createElement('a');
+      a.className='page-link';
+      a.href='#';
+      a.textContent=text||page;
+      a.addEventListener('click', e=>{e.preventDefault();if(!disabled&&!active) loadPage(category,site,page);});
+      li.appendChild(a);
+      return li;
+    }
+    ul.appendChild(createPageItem(currentPage-1,'<',currentPage===1,false));
+    let startPage=1,endPage=totalPages;
+    if(totalPages>7){
+      if(currentPage<=4) endPage=5;
+      else if(currentPage>=totalPages-3) startPage=totalPages-4;
+      else {startPage=currentPage-2; endPage=currentPage+2;}
+    }
+    if(startPage>1){ul.appendChild(createPageItem(1)); if(startPage>2){const li=document.createElement('li'); li.className='page-item disabled'; li.innerHTML='<span class="page-link">...</span>'; ul.appendChild(li);}}
+    for(let p=startPage;p<=endPage;p++) ul.appendChild(createPageItem(p,null,false,p===currentPage));
+    if(endPage<totalPages){if(endPage<totalPages-1){const li=document.createElement('li'); li.className='page-item disabled'; li.innerHTML='<span class="page-link">...</span>'; ul.appendChild(li);} ul.appendChild(createPageItem(totalPages));}
+    ul.appendChild(createPageItem(currentPage+1,'>',currentPage===totalPages,false));
+    container.appendChild(ul);
+  }
+
+  document.querySelectorAll('button[data-bs-toggle="tab"]').forEach(tabBtn=>{
+    tabBtn.addEventListener('shown.bs.tab', e=>{
+      const targetId = e.target.getAttribute('data-bs-target').replace('#','');
+      const [category, site] = targetId.split('-');
+      loadPage(category, site, 1);
+    });
+  });
+
+  async function loadPage(category, site, page=1){
+    const key=`${category}__${site}`;
+    const inst = fpInstances[key];
+    let start='', end='';
+    if(inst && inst.selectedDates.length>0){start=inst.formatDate(inst.selectedDates[0],'Y-m-d'); end=inst.formatDate(inst.selectedDates[1]??inst.selectedDates[0],'Y-m-d');}
+    try{
+      const res = await fetch(`/items/filter?start=${start}&end=${end}&category=${category}&site=${site}&page=${page}`);
+      const data = await res.json();
+      renderRows(category, site, data.rows||[]);
+      renderPagination(category, site, data.page||1, data.totalPages||1);
+    }catch(err){
+      console.error(err);
+      renderRows(category, site, []);
+      renderPagination(category, site, 1, 1);
+    }
+  }
+
+  document.querySelectorAll('.filter-btn').forEach(btn=>{
+    btn.addEventListener('click', ()=>{const category=btn.dataset.category; const site=btn.dataset.site; loadPage(category,site,1);});
+  });
+
+  document.querySelectorAll('.date-range').forEach(input=>{
+    const category=input.dataset.category; const site=input.dataset.site; loadPage(category,site,1);
+  });
+
+});
+</script>
 </body>
 </html>

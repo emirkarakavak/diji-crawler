@@ -12,6 +12,7 @@
   "dependencies": {
     "express": "^5.1.0",
     "mongoose": "^8.18.0",
+    "node": "^24.6.0",
     "node-cron": "^4.2.1",
     "puppeteer": "^24.17.0",
     "twig": "^1.17.1",

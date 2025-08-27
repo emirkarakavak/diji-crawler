@@ -184,7 +184,7 @@ exports.run = async (tasks = []) => {
               currency: it.currency,       // "₺"
               url,
             },
-            { archiveMode: "price-change" }
+            { archiveMode: "always" }
           );
           console.log(
             `Upsert: [${categoryName}] ${it.title} -> ${sellPriceStr} (${sellPriceValue ?? "NaN"} ${it.currency})`

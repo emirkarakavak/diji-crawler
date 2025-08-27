@@ -2,6 +2,7 @@ const mongoose = require("mongoose");
 const express = require("express");
 const app = express();
 const Item = require("./models/item");
+const ItemArchived = require("./models/itemArchived");
 const cron = require("node-cron");
 const bng = require("./cronTasks/bng");
 const gamesatis = require("./cronTasks/gamesatis");
@@ -151,6 +152,108 @@ app.get("/", async (req, res) => {
   }
 });
 
+
+function parseDateOnly(iso) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso);
+  if (!m) return null;
+  const y = +m[1], mo = +m[2], d = +m[3];
+  return new Date(Date.UTC(y, mo - 1, d, 0, 0, 0, 0));
+}
+
+app.get('/items/:name/prices', async (req, res) => {
+  try {
+    const itemName = req.params.name;              // <-- row.name bununla eşleşmeli
+    const siteName = req.query.site || undefined;  // opsiyonel
+    const categoryName = req.query.category || undefined; // opsiyonel
+
+    // Tarihler: "YYYY-MM-DD"
+    const startStr = req.query.start;
+    const endStr   = req.query.end;
+
+    const start = startStr ? parseDateOnly(startStr) : new Date(0);
+    const end   = endStr   ? parseDateOnly(endStr)   : new Date();
+    if (!start || !end) return res.status(400).json({ error: 'invalid_date' });
+
+    // end dahil olsun diye: [start, end+1gün)
+    const endExclusive = new Date(end.getTime() + 24*60*60*1000);
+
+    // Match objesini alan adlarına göre kur
+    const match = {
+      itemName: itemName,
+      createdAt: { $gte: start, $lt: endExclusive }
+    };
+    if (siteName) match.siteName = siteName;
+    if (categoryName) match.categoryName = categoryName;
+
+    const pipeline = [
+      { $match: match },
+
+      // sellPrice string -> number (virgül varsa noktaya çevir)
+      {
+        $addFields: {
+          _priceRaw: "$sellPrice"
+        }
+      },
+      {
+        $addFields: {
+          _priceStr: {
+            $cond: [
+              { $eq: [{ $type: "$_priceRaw" }, "string"] },
+              { $replaceOne: { input: "$_priceRaw", find: ",", replacement: "." } },
+              { $toString: "$_priceRaw" } // eğer sayıysa stringe çevir
+            ]
+          }
+        }
+      },
+      {
+        $addFields: {
+          priceNum: {
+            $convert: { input: "$_priceStr", to: "double", onError: null, onNull: null }
+          }
+        }
+      },
+      // Gün string’i (TR saatine göre)
+      {
+        $addFields: {
+          dayStr: {
+            $dateToString: { format: "%Y-%m-%d", date: "$createdAt", timezone: "Europe/Istanbul" }
+          }
+        }
+      },
+
+      // Gün içi son kaydı almak için önce tarihe göre sırala
+      { $sort: { createdAt: 1 } },
+
+      // Günlük grupla: SON fiyatı al
+      {
+        $group: {
+          _id: "$dayStr",
+          price: { $last: "$priceNum" },   // günlük son fiyat
+          // istersen bu alanlardan birini döndür
+          currency: { $last: "$currency" } // yoksa kaldır
+        }
+      },
+
+      // X ekseni kronolojik
+      { $sort: { _id: 1 } }
+    ];
+
+    const rows = await ItemArchived.aggregate(pipeline).exec();
+
+    res.json({
+      labels: rows.map(r => r._id),
+      data: rows.map(r => r.price),
+      currency: rows[0]?.currency || 'TRY'
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'server_error' });
+  }
+});
+
+
+
+
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 const pipeline = [
@@ -161,93 +264,93 @@ const pipeline = [
       "bynogame-mlbb-tr"
     ),
   },
-  {
-    name: "bynogame mlbb GLOBAL",
-    run: () => bng.run(
-      "https://www.bynogame.com/tr/oyunlar/mobile-legends/mobile-legends-global",
-      "bynogame-mlbb-global"
-    ),
-  },
-  {
-    name: "bynogame GLOBAL",
-    run: () => bng.run(
-      "https://www.bynogame.com/tr/oyunlar/pubg/pubg-mobile-uc",
-      "bynogame-pubgm"
-    ),
-  },
-  {
-    name: "GameSatış (TR+GLOBAL)",
-    run: () => gamesatis.run([
-      { url: "https://www.gamesatis.com/mobile-legends-elmas-tr", categoryName: "gamesatis-mlbb-tr" },
-      { url: "https://www.gamesatis.com/mobile-legends-elmas-global", categoryName: "gamesatis-mlbb-global" },
-      { url: "https://www.gamesatis.com/pubg-mobile-uc", categoryName: "gamesatis-pubgm" },
-    ]),
-  },
-  {
-    name: "Hesap.com.tr (tek sayfa TR+GLOBAL)",
-    run: () => hesapcomtr.run("https://hesap.com.tr/urunler/mlbb-elmas-satin-al", {
-      categoryMap: { tr: "hesap-mlbb-tr", global: "hesap-mlbb-global" },
-      decideCategory: (title) => title.toLowerCase().includes("global") ? "global" : "tr",
-    }),
-  },
-  {
-    name: "Hesap.com.tr PUBG (TR)",
-    run: () =>
-      hesapcomtr.run("https://hesap.com.tr/urunler/pubg-mobile-uc-satin-al", {
-        categoryMap: { tr: "hesap-pubgm-tr" },
-        decideCategory: () => "tr",
-      }),
-  },
-  {
-    name: "Perdigital (TR)",
-    run: () => perdigital.run([
-      { url: "https://www.perdigital.com/mobile-legends-elmas", categoryName: "perdigital-mlbb-tr" },
+  // {
+  //   name: "bynogame mlbb GLOBAL",
+  //   run: () => bng.run(
+  //     "https://www.bynogame.com/tr/oyunlar/mobile-legends/mobile-legends-global",
+  //     "bynogame-mlbb-global"
+  //   ),
+  // },
+  // {
+  //   name: "bynogame GLOBAL",
+  //   run: () => bng.run(
+  //     "https://www.bynogame.com/tr/oyunlar/pubg/pubg-mobile-uc",
+  //     "bynogame-pubgm"
+  //   ),
+  // },
+  // {
+  //   name: "GameSatış (TR+GLOBAL)",
+  //   run: () => gamesatis.run([
+  //     { url: "https://www.gamesatis.com/mobile-legends-elmas-tr", categoryName: "gamesatis-mlbb-tr" },
+  //     { url: "https://www.gamesatis.com/mobile-legends-elmas-global", categoryName: "gamesatis-mlbb-global" },
+  //     { url: "https://www.gamesatis.com/pubg-mobile-uc", categoryName: "gamesatis-pubgm" },
+  //   ]),
+  // },
+  // {
+  //   name: "Hesap.com.tr (tek sayfa TR+GLOBAL)",
+  //   run: () => hesapcomtr.run("https://hesap.com.tr/urunler/mlbb-elmas-satin-al", {
+  //     categoryMap: { tr: "hesap-mlbb-tr", global: "hesap-mlbb-global" },
+  //     decideCategory: (title) => title.toLowerCase().includes("global") ? "global" : "tr",
+  //   }),
+  // },
+  // {
+  //   name: "Hesap.com.tr PUBG (TR)",
+  //   run: () =>
+  //     hesapcomtr.run("https://hesap.com.tr/urunler/pubg-mobile-uc-satin-al", {
+  //       categoryMap: { tr: "hesap-pubgm-tr" },
+  //       decideCategory: () => "tr",
+  //     }),
+  // },
+  // {
+  //   name: "Perdigital (TR)",
+  //   run: () => perdigital.run([
+  //     { url: "https://www.perdigital.com/mobile-legends-elmas", categoryName: "perdigital-mlbb-tr" },
 
-    ]),
-  },
-  {
-    name: "Perdigital (GLOBAL)",
-    run: () => perdigital.run([
-      { url: "https://www.perdigital.com/mobile-legends-elmas-global", categoryName: "perdigital-mlbb-global" },
-    ]),
-  },
-  {
-    name: "Perdigital PUBG",
-    run: () => perdigital.run([
-      { url: "https://www.perdigital.com/online-oyun/tencent-games/pubg-mobile-uc", categoryName: "perdigital-pubgm-tr" },
-    ]),
-  },
-  {
-    name: "VatanGame (TR+GLOBAL)",
-    run: () => vatangame.run([
-      { url: "https://vatangame.com/oyunlar/mobile-legends-bang-bang-elmas", categoryName: "vatangame-mlbb-tr" },
-      { url: "https://vatangame.com/oyunlar/global-mobile-legends-bang-bang-elmas", categoryName: "vatangame-mlbb-global" },
-    ]),
-  },
-  {
-    name: "VatanGame PUBG (TR)",
-    run: () => vatangame.run([
-      { url: "https://vatangame.com/oyunlar/pubg-mobile-uc-tr", categoryName: "vatangame-pubgm-tr" },
-    ]),
-  },
-  {
-    name: "Kabasakal PUBG (TR)",
-    run: () => kabasakal.run([
-      { url: "https://kabasakalonline.com/urunler/106/pubg-mobile", categoryName: "kabasakal-pubgm-tr" },
-    ]),
-  },
-  {
-    name: "Kabasakal MLBB (TR)",
-    run: () => kabasakal.run([
-      { url: "https://kabasakalonline.com/urunler/127/mobile-legends-elmas-tr", categoryName: "kabasakal-mlbb-tr" },
-    ]),
-  },
-  {
-    name: "Kabasakal MLBB (GLOBAL)",
-    run: () => kabasakal.run([
-      { url: "https://kabasakalonline.com/urunler/239/mobile-legends-global-elmas", categoryName: "kabasakal-mlbb-global" },
-    ]),
-  }
+  //   ]),
+  // },
+  // {
+  //   name: "Perdigital (GLOBAL)",
+  //   run: () => perdigital.run([
+  //     { url: "https://www.perdigital.com/mobile-legends-elmas-global", categoryName: "perdigital-mlbb-global" },
+  //   ]),
+  // },
+  // {
+  //   name: "Perdigital PUBG",
+  //   run: () => perdigital.run([
+  //     { url: "https://www.perdigital.com/online-oyun/tencent-games/pubg-mobile-uc", categoryName: "perdigital-pubgm-tr" },
+  //   ]),
+  // },
+  // {
+  //   name: "VatanGame (TR+GLOBAL)",
+  //   run: () => vatangame.run([
+  //     { url: "https://vatangame.com/oyunlar/mobile-legends-bang-bang-elmas", categoryName: "vatangame-mlbb-tr" },
+  //     { url: "https://vatangame.com/oyunlar/global-mobile-legends-bang-bang-elmas", categoryName: "vatangame-mlbb-global" },
+  //   ]),
+  // },
+  // {
+  //   name: "VatanGame PUBG (TR)",
+  //   run: () => vatangame.run([
+  //     { url: "https://vatangame.com/oyunlar/pubg-mobile-uc-tr", categoryName: "vatangame-pubgm-tr" },
+  //   ]),
+  // },
+  // {
+  //   name: "Kabasakal PUBG (TR)",
+  //   run: () => kabasakal.run([
+  //     { url: "https://kabasakalonline.com/urunler/106/pubg-mobile", categoryName: "kabasakal-pubgm-tr" },
+  //   ]),
+  // },
+  // {
+  //   name: "Kabasakal MLBB (TR)",
+  //   run: () => kabasakal.run([
+  //     { url: "https://kabasakalonline.com/urunler/127/mobile-legends-elmas-tr", categoryName: "kabasakal-mlbb-tr" },
+  //   ]),
+  // },
+  // {
+  //   name: "Kabasakal MLBB (GLOBAL)",
+  //   run: () => kabasakal.run([
+  //     { url: "https://kabasakalonline.com/urunler/239/mobile-legends-global-elmas", categoryName: "kabasakal-mlbb-global" },
+  //   ]),
+  // }
 ];
 
 async function runAllOnce(selected = []) {

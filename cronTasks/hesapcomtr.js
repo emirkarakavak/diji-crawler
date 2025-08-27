@@ -187,7 +187,7 @@ exports.run = async (
             currency: item.currency,
             url,
           },
-          { archiveMode: "price-change" }
+          { archiveMode: "always" }
         );
         console.log(
           `Upsert: [${categoryName}] ${item.title} -> ${sellPriceStr} (${sellPriceValue ?? "NaN"} ${item.currency})`

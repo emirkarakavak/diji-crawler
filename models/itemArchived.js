@@ -3,10 +3,10 @@ const mongoose = require("mongoose");
 
 const itemArchivedSchema = new mongoose.Schema(
   {
-    siteName:     { type: String, required: true },
+    siteName: { type: String, required: true },
     categoryName: { type: String, required: true },
-    itemName:     { type: String, required: true },
-    sellPrice:    { type: String, required: true },
+    itemName: { type: String, required: true },
+    sellPrice: { type: String, required: true },
   },
   { timestamps: true } // createdAt, updatedAt
 );

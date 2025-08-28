@@ -33,7 +33,7 @@ const SITE_LABELS = {
   vatangame: "VatanGame",
   bynogame: "ByNoGame",
   perdigital: "PerDigital",
-  kabasakal: "Kabasakal",
+  kabasakalonline: "Kabasakal Online",
 };
 const SITE_ORDER = ["gamesatis", "hesapcomtr", "vatangame", "bynogame", "perdigital", "kabasakal"];
 
@@ -56,7 +56,6 @@ const PUBG_CATEGORIES = [
 const ALL_CATEGORIES = [...MLBB_CATEGORIES, ...PUBG_CATEGORIES];
 const MLBB_SET = new Set(MLBB_CATEGORIES);
 const PUBG_SET = new Set(PUBG_CATEGORIES);
-
 // ---- Yardımcılar ----
 const normName = (s) =>
   String(s || "")
@@ -86,7 +85,7 @@ app.get("/", async (req, res) => {
     const items = await Item.find(
       { categoryName: { $in: ALL_CATEGORIES } },
       { siteName: 1, categoryName: 1, itemName: 1, sellPrice: 1, sellPriceValue: 1 } // projection
-    ).lean();
+    ).sort({ createdAt: 1 }).lean();
 
     const model = {
       mlbb: { id: "mlbb", label: "Mobile Legends", sites: {} },
@@ -101,7 +100,6 @@ app.get("/", async (req, res) => {
       const region = /global/i.test(cat) ? "global" : "tr";
       const siteId = String(it.siteName || "").toLowerCase();
       const siteLabel = SITE_LABELS[siteId] || it.siteName || siteId || "Bilinmeyen";
-
       if (!model[game].sites[siteId]) {
         model[game].sites[siteId] = { id: siteId, label: siteLabel, _rows: new Map() };
       }
@@ -162,89 +160,191 @@ function parseDateOnly(iso) {
 
 app.get('/items/:name/prices', async (req, res) => {
   try {
-    const itemName = req.params.name;              // <-- row.name bununla eşleşmeli
-    const siteName = req.query.site || undefined;  // opsiyonel
-    const categoryName = req.query.category || undefined; // opsiyonel
+    // ---- params
+    const itemNameRaw = req.params.name;
+    const siteName = req.query.siteId || undefined;
+    const categoryName = req.query.category || undefined;
 
-    // Tarihler: "YYYY-MM-DD"
     const startStr = req.query.start;
-    const endStr   = req.query.end;
-
+    const endStr = req.query.end;
     const start = startStr ? parseDateOnly(startStr) : new Date(0);
-    const end   = endStr   ? parseDateOnly(endStr)   : new Date();
+    const end = endStr ? parseDateOnly(endStr) : new Date();
     if (!start || !end) return res.status(400).json({ error: 'invalid_date' });
+    const endExclusive = new Date(end.getTime() + 24 * 60 * 60 * 1000);
 
-    // end dahil olsun diye: [start, end+1gün)
-    const endExclusive = new Date(end.getTime() + 24*60*60*1000);
+    // İstekle gelen adı normalize et (sondaki "Global" varyasyonlarını at)
+    const suffixRe = /[\s\-–—\(\[]+(?:global|tr)(?:\)|\])?\s*$/i;
+    let itemNameNorm = String(req.params.name || '').trim();
+    while (suffixRe.test(itemNameNorm)) {
+      itemNameNorm = itemNameNorm.replace(suffixRe, '').trim();
+    }
 
-    // Match objesini alan adlarına göre kur
-    const match = {
-      itemName: itemName,
+    // itemName hariç filtreler
+    const baseMatch = {
       createdAt: { $gte: start, $lt: endExclusive }
     };
-    if (siteName) match.siteName = siteName;
-    if (categoryName) match.categoryName = categoryName;
+    if (siteName) baseMatch.siteName = siteName;
+    if (categoryName) baseMatch.categoryName = categoryName;
 
     const pipeline = [
-      { $match: match },
+      // 0) önce tarih/site/category ile daralt
+      { $match: baseMatch },
 
-      // sellPrice string -> number (virgül varsa noktaya çevir)
+      // 1) itemName'i pipeline içinde normalize et (sondaki "Global" varyasyonlarını sil)
       {
-        $addFields: {
-          _priceRaw: "$sellPrice"
-        }
+  $addFields: {
+    _itemNameNorm: {
+      $function: {
+        body: function (s) {
+          if (s == null) return null;
+          s = String(s).trim();
+          var re = /[\s\-–—\(\[]+(?:global|tr)(?:\)|\])?\s*$/i;
+          // Sonda birden fazla etiket varsa (ör. " - TR (Global)") hepsini sil
+          while (re.test(s)) {
+            s = s.replace(re, '').trim();
+          }
+          return s;
+        },
+        args: ["$itemName"],
+        lang: "js"
+      }
+    }
+  }
       },
+
+      // 2) normalize ettiğimiz isim ile eşleştir
+      { $match: { $expr: { $eq: ["$_itemNameNorm", itemNameNorm] } } },
+
+      // 3) fiyat ham değer
+      { $addFields: { _priceRaw: "$sellPrice" } },
+
+      // 4) string'e çevir + kırp
       {
         $addFields: {
           _priceStr: {
             $cond: [
               { $eq: [{ $type: "$_priceRaw" }, "string"] },
-              { $replaceOne: { input: "$_priceRaw", find: ",", replacement: "." } },
-              { $toString: "$_priceRaw" } // eğer sayıysa stringe çevir
+              { $trim: { input: "$_priceRaw" } },
+              { $toString: "$_priceRaw" }
             ]
           }
         }
       },
+
+      // 5) yerel formatı normalize et -> double
       {
         $addFields: {
           priceNum: {
-            $convert: { input: "$_priceStr", to: "double", onError: null, onNull: null }
+            $function: {
+              body: function (s) {
+                if (s == null) return null;
+                s = String(s).replace(/\s+/g, '').replace(/[^\d.,-]/g, '');
+                const hasComma = s.indexOf(',') !== -1;
+                const hasDot = s.indexOf('.') !== -1;
+
+                if (hasComma && hasDot) {
+                  const lastComma = s.lastIndexOf(',');
+                  const lastDot = s.lastIndexOf('.');
+                  if (lastComma > lastDot) { s = s.replace(/\./g, '').replace(',', '.'); }
+                  else { s = s.replace(/,/g, ''); }
+                } else if (hasComma) {
+                  const parts = s.split(',');
+                  if (parts.length > 2) { const dec = parts.pop(); s = parts.join('') + '.' + dec; }
+                  else { s = s.replace(',', '.'); }
+                } else if (hasDot) {
+                  const parts = s.split('.');
+                  if (parts.length > 2) {
+                    const last = parts.pop();
+                    if (last.length === 3) { s = parts.join('') + last; }
+                    else { s = parts.join('') + '.' + last; }
+                  } else {
+                    const idx = s.indexOf('.'); const fracLen = s.length - idx - 1;
+                    if (fracLen === 3) s = s.replace('.', '');
+                  }
+                }
+                const num = parseFloat(s);
+                return isNaN(num) ? null : num;
+              },
+              args: ["$_priceStr"],
+              lang: "js"
+            }
           }
         }
       },
-      // Gün string’i (TR saatine göre)
+
+      // 6) null fiyatları at
+      { $match: { priceNum: { $ne: null } } },
+
+      // 7) gün (Europe/Istanbul)
       {
         $addFields: {
           dayStr: {
-            $dateToString: { format: "%Y-%m-%d", date: "$createdAt", timezone: "Europe/Istanbul" }
+            $dateToString: {
+              format: "%Y-%m-%d",
+              date: "$createdAt",
+              timezone: "Europe/Istanbul"
+            }
           }
         }
       },
 
-      // Gün içi son kaydı almak için önce tarihe göre sırala
+      // 8) gün içi son kaydı almak için sırala
       { $sort: { createdAt: 1 } },
 
-      // Günlük grupla: SON fiyatı al
+      // 9) Gün + Kategori bazında günlük SON fiyat
       {
         $group: {
-          _id: "$dayStr",
-          price: { $last: "$priceNum" },   // günlük son fiyat
-          // istersen bu alanlardan birini döndür
-          currency: { $last: "$currency" } // yoksa kaldır
+          _id: { day: "$dayStr", category: "$categoryName" },
+          price: { $last: "$priceNum" },
+          currency: { $last: "$currency" }
         }
       },
 
-      // X ekseni kronolojik
-      { $sort: { _id: 1 } }
+      // 10) facet: kategori serileri + tüm günler
+      {
+        $facet: {
+          perCategory: [
+            {
+              $group: {
+                _id: "$_id.category",
+                points: { $push: { day: "$_id.day", price: "$price" } },
+                currency: { $first: "$currency" }
+              }
+            },
+            { $unwind: { path: "$points", preserveNullAndEmptyArrays: true } },
+            { $sort: { "_id": 1, "points.day": 1 } },
+            {
+              $group: {
+                _id: "$_id",
+                points: { $push: "$points" },
+                currency: { $first: "$currency" }
+              }
+            }
+          ],
+          allDays: [
+            { $group: { _id: null, days: { $addToSet: "$_id.day" } } },
+            { $project: { _id: 0, days: 1 } }
+          ]
+        }
+      }
     ];
 
-    const rows = await ItemArchived.aggregate(pipeline).exec();
+    const agg = await ItemArchived.aggregate(pipeline).exec();
+    const perCategory = agg[0]?.perCategory || [];
+    const labels = (agg[0]?.allDays?.[0]?.days || []).sort();
 
-    res.json({
-      labels: rows.map(r => r._id),
-      data: rows.map(r => r.price),
-      currency: rows[0]?.currency || 'TRY'
+    const datasets = perCategory.map(cat => {
+      const map = new Map(cat.points.map(p => [p.day, p.price]));
+      const data = labels.map(d => (map.has(d) ? map.get(d) : null));
+      return {
+        label: cat._id || 'unknown',
+        data,
+        currency: cat.currency || 'TRY'
+      };
     });
+    console.log(datasets);
+    res.json({ labels, datasets });
+
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'server_error' });
@@ -254,16 +354,19 @@ app.get('/items/:name/prices', async (req, res) => {
 
 
 
+
+
+
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 const pipeline = [
-  {
-    name: "bynogame mlbb TR",
-    run: () => bng.run(
-      "https://www.bynogame.com/tr/oyunlar/mobile-legends/mobile-legends-turkiye",
-      "bynogame-mlbb-tr"
-    ),
-  },
+  // {
+  //   name: "bynogame mlbb TR",
+  //   run: () => bng.run(
+  //     "https://www.bynogame.com/tr/oyunlar/mobile-legends/mobile-legends-turkiye",
+  //     "bynogame-mlbb-tr"
+  //   ),
+  // },
   // {
   //   name: "bynogame mlbb GLOBAL",
   //   run: () => bng.run(
@@ -278,14 +381,14 @@ const pipeline = [
   //     "bynogame-pubgm"
   //   ),
   // },
-  // {
-  //   name: "GameSatış (TR+GLOBAL)",
-  //   run: () => gamesatis.run([
-  //     { url: "https://www.gamesatis.com/mobile-legends-elmas-tr", categoryName: "gamesatis-mlbb-tr" },
-  //     { url: "https://www.gamesatis.com/mobile-legends-elmas-global", categoryName: "gamesatis-mlbb-global" },
-  //     { url: "https://www.gamesatis.com/pubg-mobile-uc", categoryName: "gamesatis-pubgm" },
-  //   ]),
-  // },
+  {
+    name: "GameSatış (TR+GLOBAL)",
+    run: () => gamesatis.run([
+      { url: "https://www.gamesatis.com/mobile-legends-elmas-tr", categoryName: "gamesatis-mlbb-tr" },
+      { url: "https://www.gamesatis.com/mobile-legends-elmas-global", categoryName: "gamesatis-mlbb-global" },
+      { url: "https://www.gamesatis.com/pubg-mobile-uc", categoryName: "gamesatis-pubgm" },
+    ]),
+  },
   // {
   //   name: "Hesap.com.tr (tek sayfa TR+GLOBAL)",
   //   run: () => hesapcomtr.run("https://hesap.com.tr/urunler/mlbb-elmas-satin-al", {
@@ -367,11 +470,11 @@ async function runAllOnce(selected = []) {
     } catch (err) {
       console.error(`✗ ${task.name} hata:`, err?.message || err);
     }
-    await sleep(1500); // siteleri üzmeyelim
+    await sleep(3000); // siteleri üzmeyelim
   }
   console.log("\n✔ Tüm işler tamam.");
 }
-runAllOnce().catch(e => console.error("cron hata:", e));
+// runAllOnce().catch(e => console.error("cron hata:", e));
 
 // cron.schedule("*/30 * * * *", () => {
 //   runAllOnce().catch(e => console.error("cron hata:", e));

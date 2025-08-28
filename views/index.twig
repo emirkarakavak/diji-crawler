@@ -161,88 +161,106 @@ document.addEventListener('DOMContentLoaded', () => {
   const filterBtn = document.getElementById('filterBtn');
   let chart;
 
-  async function fetchPrices(name, start, end) {
-    const params = new URLSearchParams();
-    if (start) params.append('start', start);
-    if (end)   params.append('end', end);
-    const url = `/items/${encodeURIComponent(name)}/prices?` + params.toString();
-    const res = await fetch(url, { headers: { 'Accept': 'application/json' }});
-    if (!res.ok) throw new Error('API hata: ' + res.status);
-    return res.json();
-  }
+async function fetchPrices(name, start, end, siteId) {
+  const params = new URLSearchParams();
+  if (start)  params.append('start', start);
+  if (end)    params.append('end', end);
+  if (siteId) params.append('siteId', siteId);   // <--- eklendi
 
-  function drawChart({ labels, data, currency }) {
+  const url = `/items/${encodeURIComponent(name)}/prices?` + params.toString();
+  const res = await fetch(url, { headers: { 'Accept': 'application/json' }});
+  if (!res.ok) throw new Error('API hata: ' + res.status);
+  return res.json();
+}
+
+  function drawChart(payload) {
+    const { labels, datasets } = payload;
     if (chart) chart.destroy();
-    if (!data || !data.length) {
+
+    if (!datasets || !datasets.length || !labels || !labels.length) {
       emptyEl.classList.remove('d-none');
       return;
     }
     emptyEl.classList.add('d-none');
+
+    // Chart.js dataset formatına çevir (renkleri Chart.js seçsin)
+    const cjDatasets = datasets.map(ds => ({
+      label: `${ds.label} (${ds.currency || '₺'})`,
+      data: ds.data,
+      tension: 0.2,
+      pointRadius: 2,
+      borderWidth: 2,
+      spanGaps: true // null günlerde çizgiyi kırma/atla
+    }));
+
     chart = new Chart(ctx, {
       type: 'line',
-      data: {
-        labels,
-        datasets: [{
-          label: `Fiyat (${currency || '₺'})`,
-          data,
-          tension: 0.2,
-          pointRadius: 2,
-          borderWidth: 2
-        }]
-      },
+      data: { labels, datasets: cjDatasets },
       options: {
         responsive: true,
         maintainAspectRatio: false,
-        scales: { x: { ticks: { maxRotation: 0 } }, y: { beginAtZero: false } },
-        plugins: { legend: { display: true }, tooltip: { mode: 'index', intersect: false } }
+        scales: {
+          x: { ticks: { maxRotation: 0 } },
+          y: { beginAtZero: false }
+        },
+        interaction: { mode: 'index', intersect: false },
+        plugins: { legend: { display: true } }
       }
     });
   }
 
-  rows.forEach(tr => {
-    tr.addEventListener('click', async () => {
-      const name = tr.getAttribute('data-name');
-      titleEl.textContent = `Fiyat Geçmişi — ${name}`;
-      document.getElementById('startDate').value = '';
-      document.getElementById('endDate').value   = '';
+const openModalAndLoad = async (name, siteId) => {
+  titleEl.textContent = `Fiyat Geçmişi — ${name}`;
+  document.getElementById('startDate').value = '';
+  document.getElementById('endDate').value   = '';
 
-      const modal = new bootstrap.Modal(modalEl);
-      modal.show();
+  const modal = new bootstrap.Modal(modalEl);
+  modal.show();
 
-      try {
-        const payload = await fetchPrices(name);
-        drawChart(payload);
-        modalEl.dataset.itemName = name; // filtre için sakla
-      } catch (e) {
-        console.error(e);
-        emptyEl.textContent = 'Veri alınamadı';
-        emptyEl.classList.remove('d-none');
-        if (chart) chart.destroy();
-      }
-    });
-  });
+  try {
+    const payload = await fetchPrices(name, undefined, undefined, siteId); // <---
+    drawChart(payload);
+    modalEl.dataset.itemName = name;
+    if (siteId) modalEl.dataset.siteId = siteId; else delete modalEl.dataset.siteId; // <---
+  } catch (e) {
+    console.error(e);
+    emptyEl.textContent = 'Veri alınamadı';
+    emptyEl.classList.remove('d-none');
+    if (chart) chart.destroy();
+  }
+};
 
+  // Satır tıklama
+document.querySelectorAll('.product-row').forEach(tr => {
+  tr.addEventListener('click', () =>
+    openModalAndLoad(tr.getAttribute('data-name'), tr.getAttribute('data-site')) // <---
+  );
+});
+
+  // Modal kapanınca temizle
   modalEl.addEventListener('hidden.bs.modal', () => {
     if (chart) { chart.destroy(); chart = null; }
     emptyEl.classList.add('d-none');
     emptyEl.textContent = 'Kayıt yok';
   });
 
-  filterBtn.addEventListener('click', async () => {
-    const start = document.getElementById('startDate').value;
-    const end   = document.getElementById('endDate').value;
-    const name  = modalEl.dataset.itemName;
-    if (!name) return;
-    try {
-      const payload = await fetchPrices(name, start, end);
-      drawChart(payload);
-    } catch (e) {
-      console.error(e);
-    }
-  });
+  // Filtre butonu
+filterBtn.addEventListener('click', async () => {
+  const start = document.getElementById('startDate').value;
+  const end   = document.getElementById('endDate').value;
+  const name  = modalEl.dataset.itemName;
+  const siteId = modalEl.dataset.siteId || null; // <---
+
+  if (!name) return;
+  try {
+    const payload = await fetchPrices(name, start, end, siteId); // <---
+    drawChart(payload);
+  } catch (e) {
+    console.error(e);
+  }
+});
 });
 </script>
-
 
 	</body>
 </html>

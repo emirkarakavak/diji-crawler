@@ -24,7 +24,7 @@ exports.run = async (
         };
 
   const browser = await puppeteer.launch({
-    headless: true,
+    headless: true,                       // puppeteer@>=20 ise "new" da olur
     args: [
       "--no-sandbox",
       "--disable-setuid-sandbox",
@@ -46,111 +46,123 @@ exports.run = async (
   page.setDefaultNavigationTimeout(90000);
   page.setDefaultTimeout(90000);
 
-  try {
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 90000 });
+  // Sürpriz dialog’ları öldür
+  page.on("dialog", d => d.dismiss().catch(() => {}));
+  page.on("pageerror", err => console.warn("PageError:", err?.message || err));
+  page.on("error", err => console.warn("TargetCrashed/Error:", err?.message || err));
 
-    // KVKK/çerez (best-effort)
+  // Kısa adımlı, güvenli scroll
+  async function safeAutoScroll(p, { step = 800, delay = 200, max = 60_000 } = {}) {
+    const start = Date.now();
+    let last = 0;
+    while (Date.now() - start < max) {
+      try {
+        const { done, scrolled } = await p.evaluate((s) => {
+          const before = window.scrollY;
+          window.scrollBy(0, s);
+          const { scrollHeight, clientHeight } = document.documentElement;
+          const atBottom = window.scrollY + clientHeight >= scrollHeight - 200;
+          return { done: atBottom, scrolled: window.scrollY - before };
+        }, step);
+        if (done || scrolled <= 0) break;
+        await p.waitForTimeout(delay);
+        last = Date.now();
+      } catch (e) {
+        // Context bozulduysa bir daha dene (mini backoff)
+        if (!/Execution context was destroyed|Cannot find context/.test(String(e))) throw e;
+        await p.waitForTimeout(500);
+      }
+    }
+  }
+
+  // evaluate çağrılarını tek sefer retry ile sarmak için yardımcı
+  async function evalWithRetry(fn) {
     try {
+      return await fn();
+    } catch (e) {
+      if (/Execution context was destroyed|Cannot find context/.test(String(e))) {
+        await page.waitForTimeout(500);
+        return await fn();
+      }
+      throw e;
+    }
+  }
+
+  try {
+    await page.goto(url, { waitUntil: "networkidle2", timeout: 90000 });
+
+    // KVKK/çerez (best-effort) – önce butonlar gelmiş mi bak
+    try {
+      // Önce DOM tarafında bekle
       await page.waitForSelector("button, .btn", { timeout: 5000 });
-      await page.evaluate(() => {
-        const texts = ["kabul", "accept", "onay", "tamam"];
-        const btns = Array.from(document.querySelectorAll("button, .btn"));
-        const hit = btns.find((b) =>
-          texts.some((t) => (b.innerText || "").toLowerCase().includes(t))
-        );
-        if (hit) hit.click();
-      });
+      // Sonra Puppeteer click dene; metin eşleşmesini handle içinde yap
+      const buttons = await page.$$("button, .btn");
+      for (const b of buttons) {
+        const txt = (await page.evaluate(el => (el.innerText || "").toLowerCase(), b)) || "";
+        if (/(kabul|accept|onay|tamam)/.test(txt)) {
+          await b.click({ delay: 10 });
+          // SPA ise küçük bir network idle bekle ki context otursun
+          try { await page.waitForNetworkIdle({ idleTime: 500, timeout: 3000 }); } catch {}
+          break;
+        }
+      }
     } catch {}
 
-    // Auto-scroll
-    async function autoScroll(p) {
-      await p.evaluate(
-        () =>
-          new Promise((resolve) => {
-            let total = 0;
-            const distance = 800;
-            const timer = setInterval(() => {
-              const { scrollHeight } = document.documentElement;
-              window.scrollBy(0, distance);
-              total += distance;
-              if (total >= scrollHeight - window.innerHeight - 200) {
-                clearInterval(timer);
-                resolve();
-              }
-            }, 200);
-          })
-      );
-    }
-    await autoScroll(page);
+    await safeAutoScroll(page);
 
-    // Kartlar geldi mi?
-    const CARD_SEL =
-      "section.product-listing-products ul.products li.col-12.prd div.item";
-    await page.waitForFunction(
-      (sel) => document.querySelectorAll(sel).length > 0,
-      { timeout: 90000 },
-      CARD_SEL
-    );
+    const CARD_SEL = "section.product-listing-products ul.products li.col-12.prd div.item";
 
-    // Çekim
-    const items = await page.evaluate(() => {
-      const CARD_SEL =
-        "section.product-listing-products ul.products li.col-12.prd div.item";
-      const NAME_SEL =
-        "div.row.g-3 .col-md-7 .l.position-relative a.d-flex span.product-name";
-      const PRICE_SEL =
-        "div.row.g-3 .col-md-5 .price-lg .new, div.row.g-3 .col-md-5 .price-lg span.new";
+    // waitForFunction yerine waitForSelector daha stabil
+    await page.waitForSelector(CARD_SEL, { timeout: 90000 });
 
-      const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
+    const items = await evalWithRetry(async () => {
+      return await page.evaluate(() => {
+        const CARD_SEL = "section.product-listing-products ul.products li.col-12.prd div.item";
+        const NAME_SEL = "div.row.g-3 .col-md-7 .l.position-relative a.d-flex span.product-name";
+        const PRICE_SEL = "div.row.g-3 .col-md-5 .price-lg .new, div.row.g-3 .col-md-5 .price-lg span.new";
 
-      // TL/TRY/₺ temiz → numerik string döndür
-      const parsePrice = (txt) => {
-        if (!txt) return { raw: "", value: null, currency: null };
-        const raw = clean(txt);
-        const curMatch = raw.match(/₺|TL|TRY|\$|€|£/i);
-        let currency = curMatch ? curMatch[0].toUpperCase() : "₺";
-        if (currency === "TL" || currency === "TRY") currency = "₺";
+        const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
 
-        const numericStr = raw
-          .replace(/(TL|TRY)/gi, "")
-          .replace(/[₺$€£]/g, "")
-          .replace(/[^\d,.\-]/g, "")
-          .replace(/\.(?=\d{3}(\D|$))/g, "")
-          .replace(",", ".")
-          .trim();
+        const parsePrice = (txt) => {
+          if (!txt) return { raw: "", value: null, currency: null };
+          const raw = clean(txt);
+          const curMatch = raw.match(/₺|TL|TRY|\$|€|£/i);
+          let currency = curMatch ? curMatch[0].toUpperCase() : "₺";
+          if (currency === "TL" || currency === "TRY") currency = "₺";
 
-        const value = parseFloat(numericStr);
-        return {
-          raw: numericStr, // "149.90"
-          value: Number.isFinite(value) ? value : null,
-          currency,
+          const numericStr = raw
+            .replace(/(TL|TRY)/gi, "")
+            .replace(/[₺$€£]/g, "")
+            .replace(/[^\d,.\-]/g, "")
+            .replace(/\.(?=\d{3}(\D|$))/g, "")
+            .replace(",", ".")
+            .trim();
+
+          const value = parseFloat(numericStr);
+          return { raw: numericStr, value: Number.isFinite(value) ? value : null, currency };
         };
-      };
 
-      const out = [];
-      const cards = Array.from(document.querySelectorAll(CARD_SEL));
-      for (const card of cards) {
-        const nameEl = card.querySelector(NAME_SEL);
-        let priceEl = card.querySelector(PRICE_SEL);
-        if (!priceEl) {
-          priceEl =
-            card.querySelector(
-              "div.row.g-3 .col-md-5 .price-sm .new, div.row.g-3 .col-md-5 .price .new"
-            ) || card.querySelector("div.row.g-3 .col-md-5 [class*='price'] .new");
+        const out = [];
+        const cards = Array.from(document.querySelectorAll(CARD_SEL));
+        for (const card of cards) {
+          const nameEl = card.querySelector(NAME_SEL);
+          let priceEl = card.querySelector(PRICE_SEL)
+            || card.querySelector("div.row.g-3 .col-md-5 .price-sm .new, div.row.g-3 .col-md-5 .price .new")
+            || card.querySelector("div.row.g-3 .col-md-5 [class*='price'] .new");
+
+          const title = clean(nameEl?.textContent || "");
+          const price = parsePrice(priceEl?.textContent || "");
+          if (!title || !price.raw) continue;
+
+          out.push({
+            title,
+            priceText: price.raw,
+            priceValue: price.value,
+            currency: price.currency || "₺",
+          });
         }
-
-        const title = clean(nameEl?.textContent || "");
-        const price = parsePrice(priceEl?.textContent || "");
-        if (!title || !price.raw) continue;
-
-        out.push({
-          title,
-          priceText: price.raw,
-          priceValue: price.value,
-          currency: price.currency || "₺",
-        });
-      }
-      return out;
+        return out;
+      });
     });
 
     if (!items || items.length === 0) {
@@ -159,7 +171,6 @@ exports.run = async (
       return;
     }
 
-    // Kategoriye böl + UPSERT & ARCHIVE
     for (const item of items) {
       const group = decideCategory(item.title);
       const categoryName = categoryMap[group] || categoryMap.tr;
@@ -182,7 +193,7 @@ exports.run = async (
             siteName: "hesapcomtr",
             categoryName,
             itemName: item.title,
-            sellPrice: sellPriceStr,     // "149.90"
+            sellPrice: sellPriceStr,
             sellPriceValue,
             currency: item.currency,
             url,

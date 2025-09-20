@@ -10,6 +10,7 @@ const hesapcomtr = require("./cronTasks/hesapcomtr");
 const perdigital = require("./cronTasks/perdigital");
 const vatangame = require("./cronTasks/vatangame");
 const kabasakal = require("./cronTasks/kabasakal");
+const oyunfor = require("./cronTasks/oyunfor");
 
 
 
@@ -35,7 +36,7 @@ const SITE_LABELS = {
   perdigital: "PerDigital",
   kabasakalonline: "Kabasakal Online",
 };
-const SITE_ORDER = ["gamesatis", "hesapcomtr", "vatangame", "bynogame", "perdigital", "kabasakal"];
+const SITE_ORDER = ["gamesatis", "hesapcomtr", "vatangame", "bynogame", "perdigital", "kabasakal", "oyunfor", "oyuneks"];
 
 const MLBB_CATEGORIES = [
   "gamesatis-mlbb-tr", "gamesatis-mlbb-global",
@@ -44,6 +45,8 @@ const MLBB_CATEGORIES = [
   "bynogame-mlbb-tr", "bynogame-mlbb-global",
   "perdigital-mlbb-tr", "perdigital-mlbb-global",
   "kabasakal-mlbb-tr", "kabasakal-mlbb-global",
+  "oyunfor-mlbb-tr", "oyunfor-mlbb-global",
+  "oyuneks-mlbb-tr", "oyuneks-mlbb-global"
 ];
 const PUBG_CATEGORIES = [
   "gamesatis-pubgm",
@@ -52,6 +55,8 @@ const PUBG_CATEGORIES = [
   "bynogame-pubgm",
   "perdigital-pubgm-tr",
   "kabasakal-pubgm-tr",
+  "oyunfor-pubgm-tr",
+  "oyuneks-pubgm-tr",
 ];
 const ALL_CATEGORIES = [...MLBB_CATEGORIES, ...PUBG_CATEGORIES];
 const MLBB_SET = new Set(MLBB_CATEGORIES);
@@ -192,24 +197,24 @@ app.get('/items/:name/prices', async (req, res) => {
 
       // 1) itemName'i pipeline içinde normalize et (sondaki "Global" varyasyonlarını sil)
       {
-  $addFields: {
-    _itemNameNorm: {
-      $function: {
-        body: function (s) {
-          if (s == null) return null;
-          s = String(s).trim();
-          var re = /[\s\-–—\(\[]+(?:global|tr)(?:\)|\])?\s*$/i;
-          // Sonda birden fazla etiket varsa (ör. " - TR (Global)") hepsini sil
-          while (re.test(s)) {
-            s = s.replace(re, '').trim();
+        $addFields: {
+          _itemNameNorm: {
+            $function: {
+              body: function (s) {
+                if (s == null) return null;
+                s = String(s).trim();
+                var re = /[\s\-–—\(\[]+(?:global|tr)(?:\)|\])?\s*$/i;
+                // Sonda birden fazla etiket varsa (ör. " - TR (Global)") hepsini sil
+                while (re.test(s)) {
+                  s = s.replace(re, '').trim();
+                }
+                return s;
+              },
+              args: ["$itemName"],
+              lang: "js"
+            }
           }
-          return s;
-        },
-        args: ["$itemName"],
-        lang: "js"
-      }
-    }
-  }
+        }
       },
 
       // 2) normalize ettiğimiz isim ile eşleştir
@@ -381,14 +386,14 @@ const pipeline = [
   //     "bynogame-pubgm"
   //   ),
   // },
-  {
-    name: "GameSatış (TR+GLOBAL)",
-    run: () => gamesatis.run([
-      { url: "https://www.gamesatis.com/mobile-legends-elmas-tr", categoryName: "gamesatis-mlbb-tr" },
-      { url: "https://www.gamesatis.com/mobile-legends-elmas-global", categoryName: "gamesatis-mlbb-global" },
-      { url: "https://www.gamesatis.com/pubg-mobile-uc", categoryName: "gamesatis-pubgm" },
-    ]),
-  },
+  // {
+  //   name: "GameSatış (TR+GLOBAL)",
+  //   run: () => gamesatis.run([
+  //     { url: "https://www.gamesatis.com/mobile-legends-elmas-tr", categoryName: "gamesatis-mlbb-tr" },
+  //     { url: "https://www.gamesatis.com/mobile-legends-elmas-global", categoryName: "gamesatis-mlbb-global" },
+  //     { url: "https://www.gamesatis.com/pubg-mobile-uc", categoryName: "gamesatis-pubgm" },
+  //   ]),
+  // },
   // {
   //   name: "Hesap.com.tr (tek sayfa TR+GLOBAL)",
   //   run: () => hesapcomtr.run("https://hesap.com.tr/urunler/mlbb-elmas-satin-al", {
@@ -453,7 +458,43 @@ const pipeline = [
   //   run: () => kabasakal.run([
   //     { url: "https://kabasakalonline.com/urunler/239/mobile-legends-global-elmas", categoryName: "kabasakal-mlbb-global" },
   //   ]),
-  // }
+  // },
+  // {
+  //   name: "oyunfor pubgm TR",
+  //   run: () =>
+  //     oyunfor.run(
+  //       "https://www.oyunfor.com/criteofeed",
+  //       "oyunfor-pubgm-tr",
+  //       { productType: "PUBG Mobile UC" }
+  //     ),
+  // },
+  // {
+  //   name: "oyunfor mlbb TR",
+  //   run: () =>
+  //     oyunfor.run(
+  //       "https://www.oyunfor.com/criteofeed",
+  //       "oyunfor-mlbb-tr",
+  //       { productType: "Mobile Legends Bang Bang Elmas" }
+  //     ),
+  // },
+  {
+    name: "oyuneks pubgm TR",
+    run: () =>
+      oyuneks.run(
+        "https://www.oyuneks.com/criteofeed", // feed url’in
+        "oyuneks-pubgm-tr",
+        { brand: "PUBG Mobile" }
+      ),
+  },
+  {
+    name: "oyuneks mlbb TR",
+    run: () =>
+      oyuneks.run(
+        "https://www.oyuneks.com/criteofeed",
+        "oyuneks-mlbb-tr",
+        { brand: "Mobile Legends" }
+      ),
+  },
 ];
 
 async function runAllOnce(selected = []) {
@@ -474,7 +515,7 @@ async function runAllOnce(selected = []) {
   }
   console.log("\n✔ Tüm işler tamam.");
 }
-// runAllOnce().catch(e => console.error("cron hata:", e));
+runAllOnce().catch(e => console.error("cron hata:", e));
 
 // cron.schedule("*/30 * * * *", () => {
 //   runAllOnce().catch(e => console.error("cron hata:", e));
